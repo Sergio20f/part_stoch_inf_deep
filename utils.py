@@ -1467,3 +1467,4 @@ class InfiniteLoader(object):
         except StopIteration:
             self.iterator = iter(self.loader)
             return next(self.iterator)
+        

@@ -151,7 +151,7 @@ class ConcatConvTranspose2d(nn.ConvTranspose2d, DiffEqModule):
 
         weight, bias = self.unpack_params(params)  # noqa
         ty = utils.channel_cat(t, y)
-        output_padding = self._output_padding(ty, output_size, self.stride, self.padding, self.kernel_size)  # noqa
+        output_padding = self._output_padding(ty, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims=2)  # noqa
         return F.conv_transpose2d(
             ty, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
 
