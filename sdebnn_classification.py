@@ -216,6 +216,18 @@ def main():
             sigma=args.sigma,
             aug_dim=args.aug,
         )
+    elif args.model == "partialsdenet":
+        model = models.PartialSDEnet(
+            input_size=input_chw,
+            inhomogeneous=args.inhomogeneous,
+            activation=args.activation,
+            verbose=args.verbose,
+            hidden_width=args.hidden_width,
+            weight_network_sizes=tuple(map(int, args.fw_width.split("-"))),
+            blocks=tuple(map(int, args.nblocks.split("-"))),
+            sigma=args.sigma,
+            aug_dim=args.aug,
+        )
     else:
         raise ValueError(f"Unknown model: {args.model}")
     ema_model = copy.deepcopy(model)
@@ -264,13 +276,13 @@ if __name__ == "__main__":
     parser.add_argument('--data', type=str, default="cifar10", choices=['mnist', 'cifar10', 'cifar100'])
     parser.add_argument('--pin-memory', type=utils.str2bool, default=True)
     parser.add_argument('--num-workers', type=int, default=8)
-    parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn'], default='sdebnn')
+    parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn', 'partialsdenet'], default='partialsdenet')
     parser.add_argument('--method', type=str, choices=['milstein', 'midpoint', "heun", "euler_heun"], default='midpoint')
     parser.add_argument('--gamma', type=float, default=0.999)
 
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--aug', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--epochs', type=int, default=2) # 200
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--eval-batch-size', type=int, default=512)
     parser.add_argument('--pause-every', type=int, default=200) 
