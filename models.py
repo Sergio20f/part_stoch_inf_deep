@@ -288,8 +288,6 @@ class PartialSDEnet(torchsde.SDEStratonovich):
             y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1)
         else:
             y, w = y.split(split_size=(y.numel() - self.params_size, self.params_size), dim=1)
-        
-        y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1) # params_size: 606408
 
         # Compute next activation 
         fy = self.y_net(t, y.reshape((-1, *self.aug_input_size)), self.unravel_params(w.squeeze(0))).reshape(-1).unsqueeze(0)
@@ -346,7 +344,8 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         if adjoint_adaptive:
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
-            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
+            # _, aug_y1
+            aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
         
         # Compute partial logqp
         logqp = .5 * aug_y1[-1]
@@ -366,7 +365,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
 
     def zero_grad(self) -> None:
         for p in self.parameters(): p.grad = None
-        
+
 
 if __name__ == "__main__":
     batch_size = 2
