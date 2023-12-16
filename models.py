@@ -41,7 +41,7 @@ def make_y_net(input_size,
             layers.extend(diffeq_layers.make_ode_k3_block_layers(input_size=_input_size,
                                                                  activation=activation,
                                                                  last_activation=i < len(blocks) or j < num_blocks,
-                                                                 hidden_width=hidden_width))
+                                                                 hidden_width=hidden_width, mode=1)) # mode 1 for MNIST
 
             if verbose:
                 if i == 1:
@@ -207,6 +207,7 @@ class SDENet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
         y1 = aug_y1[0,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
+        #logits = nn.functional.softmax(logits, dim=1)
         logqp = .5 * aug_y1[-1]
         return logits, logqp
 
@@ -287,7 +288,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         if self.sde_loop:
             y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1)
         else:
-            y, w = y.split(split_size=(y.numel() - self.params_size, self.params_size), dim=1)
+            y, w = y.split(split_size=(y.numel() - self.params_size, self.params_size), dim=-1) # change
 
         # Compute next activation 
         fy = self.y_net(t, y.reshape((-1, *self.aug_input_size)), self.unravel_params(w.squeeze(0))).reshape(-1).unsqueeze(0)
@@ -298,14 +299,14 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         
         if self.sde_loop:
             # Compute next u^2 for divergence control: (prior - posterior) / sigma = (w - (nn-w)) -  this is partial logqp
-            fl = (nn ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2)
+            fl = ((nn ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2))
             
-            assert input_y.shape == torch.cat([fy, fw, fl], dim=1).shape, f"Want: {input_y.shape} Got: {torch.cat((fy, fw, fl)).shape}. Check nblocks for dataset divisibility.\n"
+            assert input_y.shape == torch.cat([fy, fw, fl], dim=-1).shape, f"Want: {input_y.shape} Got: {torch.cat((fy, fw, fl)).shape}. Check nblocks for dataset divisibility.\n"
             return torch.cat([fy, fw, fl], dim=1)
 
         else:
-            assert input_y.shape == torch.cat([fy, fw], dim=1).shape
-            return torch.cat([fy, fw], dim=1)
+            assert input_y.squeeze(0).shape == torch.cat([fy.squeeze(0), fw]).shape
+            return torch.cat([fy.squeeze(0), fw]) # change
 
 
     def g(self, t, y):
@@ -356,7 +357,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         aug_y2 = odeint(self.f, aug_y[:, :-1].squeeze(0), timesteps_ode, method=method_ode, rtol=rtol_ode, atol=atol_ode)
 
         # Extract activations after sde integration
-        y2 = aug_y2[-1, :, :y.numel()].reshape(y.size())
+        y2 = aug_y2[-1, :y.numel()].reshape(y.size()) # Change
 
         # Compute logits and logqp
         logits = self.projection(y2)
@@ -375,4 +376,4 @@ if __name__ == "__main__":
 
     y0 = torch.randn(batch_size, c, h, w)
     y1 = sde(y0)
-    torch.testing.assert_allclose(y0, y1)
+    torch.testing.assert_close(y0, y1)

@@ -273,7 +273,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=1000000)
     parser.add_argument('--no-gpu', action="store_true")
     parser.add_argument('--subset', type=int, default=None, help="Use subset of mnist data.")
-    parser.add_argument('--data', type=str, default="cifar10", choices=['mnist', 'cifar10', 'cifar100'])
+    parser.add_argument('--data', type=str, default="mnist", choices=['mnist', 'cifar10', 'cifar100'])
     parser.add_argument('--pin-memory', type=utils.str2bool, default=True)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn', 'partialsdenet'], default='partialsdenet')
