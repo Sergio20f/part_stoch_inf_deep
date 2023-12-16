@@ -213,6 +213,161 @@ class SDENet(torchsde.SDEStratonovich):
     def zero_grad(self) -> None:
         for p in self.parameters(): p.grad = None
 
+
+class PartialSDEnet(torchsde.SDEStratonovich):
+
+    def __init__(self,
+                input_size=(3, 32, 32),
+                blocks=(2, 2, 2),
+                weight_network_sizes=(1, 64, 1),
+                num_classes=10,
+                activation="softplus",
+                verbose=False,
+                inhomogeneous=True,
+                sigma=0.1,
+                hidden_width=128,
+                aug_dim=0,
+                timecut=0.1):
+        
+        # Noise type is diagonal means that the noise is independent across dimensions
+        super(PartialSDEnet, self).__init__(noise_type="diagonal")
+
+        self.input_size = input_size
+        self.aug_input_size = (aug_dim + input_size[0], *input_size[1:])  # (4, 32, 32) from (3, 32, 32)
+        self.aug_zeros_size = (aug_dim, *input_size[1:])                  # (1, 32, 32) from (32, 32)
+        self.register_buffer('aug_zeros', torch.zeros(size=(1, *self.aug_zeros_size)))
+
+        # Create network evolving state.
+        self.y_net, self.output_size = make_y_net(input_size=input_size,        # output size should be the same as input size with n_features+aug_dim
+                                                  blocks=blocks,
+                                                  activation=activation,
+                                                  verbose=verbose,
+                                                  hidden_width=hidden_width,
+                                                  aug_dim=aug_dim)
+        
+        # Create network evolving weights.
+        initial_params = self.y_net.make_initial_params()                            # extracts w0 from the y_net
+        flat_initial_params, unravel_params = utils.ravel_pytree(initial_params)     # flattens the w0
+
+        self.flat_initial_params = nn.Parameter(flat_initial_params, requires_grad=True)  # makes parameters (weigths of y_net) trainable
+        self.params_size = flat_initial_params.numel()                                    # number of parameters
+        self.unravel_params = unravel_params      
+        print(f"initial_params ({self.params_size}): {flat_initial_params.shape}")
+        
+        self.w_net = make_w_net(in_features=self.params_size,
+                                hidden_sizes=weight_network_sizes,
+                                activation="tanh",
+                                inhomogeneous=inhomogeneous)
+
+        # Final projection layer.
+        self.projection = nn.Sequential(nn.Flatten(),
+                                        # nn.Linear(int(np.prod(self.output_size)), num_classes), # option: projection w/o ReLU
+                                        nn.Linear(int(np.prod(self.output_size)), 1024),
+                                        nn.ReLU(inplace=True),
+                                        nn.Linear(1024, num_classes))
+
+        # Initialise time steps 
+        self.timecut = timecut
+        self.register_buffer('ts', torch.tensor([0., self.timecut, 1.]))
+
+        # Initialise sigma (noise std)
+        self.sigma = sigma
+        
+        # Initialise number of function evaluations
+        self.nfe = 0
+
+
+    def f(self, t, y: torch.Tensor):
+        """
+        This is the drift that in this case is common to SDE and ODE 
+        """
+        input_y = y
+        self.nfe += 1
+
+        if self.sde_loop:
+            y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1)
+        else:
+            y, w = y.split(split_size=(y.numel() - self.params_size, self.params_size), dim=1)
+        
+        y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1) # params_size: 606408
+
+        # Compute next activation 
+        fy = self.y_net(t, y.reshape((-1, *self.aug_input_size)), self.unravel_params(w.squeeze(0))).reshape(-1).unsqueeze(0)
+        
+        # Compute next weight
+        nn = self.w_net(t, w)
+        fw = nn - w  # hardcoded OU prior on weights w
+        
+        if self.sde_loop:
+            # Compute next u^2 for divergence control: (prior - posterior) / sigma = (w - (nn-w)) -  this is partial logqp
+            fl = (nn ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2)
+            
+            assert input_y.shape == torch.cat([fy, fw, fl], dim=1).shape, f"Want: {input_y.shape} Got: {torch.cat((fy, fw, fl)).shape}. Check nblocks for dataset divisibility.\n"
+            return torch.cat([fy, fw, fl], dim=1)
+
+        else:
+            assert input_y.shape == torch.cat([fy, fw], dim=1).shape
+            return torch.cat([fy, fw], dim=1)
+
+
+    def g(self, t, y):
+        self.nfe += 1
+        gy = torch.zeros(size=(y.numel() - self.params_size - 1,), device=y.device)
+        gw = torch.full(size=(self.params_size,), fill_value=self.sigma, device=y.device)
+        gl = torch.tensor([0.], device=y.device)
+        return torch.cat([gy, gw, gl], dim=0).unsqueeze(0)
+
+
+    def make_initial_params(self):
+        return self.y_net.make_initial_params()
+
+
+    def forward(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
+        
+        # initialise number of function evaluations and boolean sde_loop
+        self.nfe = 0  
+        self.sde_loop = True
+
+        sdeint = torchsde.sdeint_adjoint if adjoint else torchsde.sdeint
+        odeint = torchdiffeq.odeint_adjoint if adjoint else torchdiffeq.odeint
+        
+        # Pointless but yeah
+        if self.aug_zeros.numel() > 0:  # Add zero channels.
+            aug_zeros = self.aug_zeros.expand(y.shape[0], *self.aug_zeros_size)
+            y = torch.cat([y, aug_zeros], dim=1) # 235200
+
+        aug_y = torch.cat((y.reshape(-1), self.flat_initial_params, torch.tensor([0.], device=y.device))) # 841609: (235200, 606408, 1)
+        aug_y = aug_y[None] # adds a  dimension at the beginning
+
+        # Initialise Brownian motion
+        bm = torchsde.BrownianInterval(t0=self.ts[0], t1=self.ts[-1], size=aug_y.shape, dtype=aug_y.dtype, device=aug_y.device,
+                                       cache_size=45 if adjoint else 30)  # If not adjoint, don't really need to cache.
+        
+        if adjoint_adaptive:
+            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
+        else:
+            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
+        
+        # Compute partial logqp
+        logqp = .5 * aug_y1[-1]
+
+        self.sde_loop = False
+        timesteps_ode = torch.linspace(self.timecut, 1, int((1-self.timecut)//dt))
+
+        aug_y2 = odeint(self.f, aug_y[:, :-1].squeeze(0), timesteps_ode, method=method_ode, rtol=rtol_ode, atol=atol_ode)
+
+        # Extract activations after sde integration
+        y2 = aug_y2[-1, :, :y.numel()].reshape(y.size())
+
+        # Compute logits and logqp
+        logits = self.projection(y2)
+        
+        return logits, logqp
+
+    def zero_grad(self) -> None:
+        for p in self.parameters(): p.grad = None
+        
+
 if __name__ == "__main__":
     batch_size = 2
     input_size = c, h, w = 3, 32, 32
