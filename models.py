@@ -212,8 +212,8 @@ class SDENet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
         y1 = aug_y1[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
-        #logits = nn.functional.softmax(logits, dim=1)
         logqp = .5 * aug_y1[-1]
+        
         return logits, logqp
 
     def zero_grad(self) -> None:
@@ -354,8 +354,8 @@ class PartialSDEnet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             # _, aug_y1
-            aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
-            # print(aug_y1.shape, "aug_y1 shape else") # ([3, 1, 589513])
+            _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
+            #print(aug_y1.shape, "aug_y1 shape else") # ([3, 1, 589513])
         
         # Compute partial logqp
         logqp = .5 * aug_y1[-1]
