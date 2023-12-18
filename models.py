@@ -187,6 +187,7 @@ class SDENet(torchsde.SDEStratonovich):
         gy = torch.zeros(size=(y.numel() - self.params_size - 1,), device=y.device)
         gw = torch.full(size=(self.params_size,), fill_value=self.sigma, device=y.device)
         gl = torch.tensor([0.], device=y.device)
+        
         return torch.cat([gy, gw, gl], dim=0).unsqueeze(0)
 
     def make_initial_params(self):
@@ -197,15 +198,18 @@ class SDENet(torchsde.SDEStratonovich):
         #  There are obviously cleaner ways to achieve this.
         self.nfe = 0    
         sdeint = torchsde.sdeint_adjoint if adjoint else torchsde.sdeint
+        
         if self.aug_zeros.numel() > 0:  # Add zero channels.
             aug_zeros = self.aug_zeros.expand(y.shape[0], *self.aug_zeros_size)
             y = torch.cat([y, aug_zeros], dim=1) # 235200
         aug_y = torch.cat((y.reshape(-1), self.flat_initial_params, torch.tensor([0.], device=y.device))) # 841609: (235200, 606408, 1)
         aug_y = aug_y[None]
+        
         bm = torchsde.BrownianInterval(
             t0=self.ts[0], t1=self.ts[-1], size=aug_y.shape, dtype=aug_y.dtype, device=aug_y.device,
             cache_size=45 if adjoint else 30  # If not adjoint, don't really need to cache.
         )
+        
         if adjoint_adaptive:
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
@@ -214,9 +218,7 @@ class SDENet(torchsde.SDEStratonovich):
         
         y1 = aug_y1[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
-        #logits = nn.functional.softmax(logits, dim=1)
 
-        logqp = .5 * aug_y1[:,-1]
         logqp = .5 * aug_y1[:, -1]
         
         return logits, logqp
@@ -364,13 +366,10 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         if adjoint_adaptive:
             _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
-            # _, aug_y1
             _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
-            _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
-            #print(aug_y1.shape, "aug_y1 shape else") # ([3, 1, 589513])
+            #print(aug_y1.shape, "aug_y1 shape else")
         
         # Compute partial logqp
-        logqp = .5 * aug_y1[:,-1]
         logqp = .5 * aug_y1[:, -1]
 
         self.sde_loop = False
@@ -417,13 +416,12 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                                        cache_size=45 if adjoint else 30)  # If not adjoint, don't really need to cache.
         
         if adjoint_adaptive:
-            aug_y2 = sdeint(self, aug_y_sde, self.ts[1:], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
+            _, aug_y2 = sdeint(self, aug_y_sde, self.ts[1:], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             _, aug_y2 = sdeint(self, aug_y_sde, self.ts[1:], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
         
         y1 = aug_y2[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
-        #logits = nn.functional.softmax(logits, dim=1)
 
         logqp = .5 * aug_y1[:,-1]
         return logits, logqp

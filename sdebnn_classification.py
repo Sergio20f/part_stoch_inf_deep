@@ -231,6 +231,7 @@ def main():
             sigma=args.sigma,
             aug_dim=args.aug,
             timecut=args.timecut,
+            ode_first=args.ode_first,
             mode=args.mode,
         )
     else:
@@ -309,6 +310,7 @@ if __name__ == "__main__":
     parser.add_argument('--fw-width', type=str, default="1-128-1")
     parser.add_argument('--nblocks', type=str, default="2-2-2")
     parser.add_argument('--sigma', type=float, default=0.1)
+    parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
     parser.add_argument('--mode', type=int, default=0) # Mode: 1 for MNIST; 0 for cifar10
     parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
 
