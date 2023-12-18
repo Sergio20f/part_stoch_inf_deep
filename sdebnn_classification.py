@@ -22,10 +22,14 @@ def train(model, ema_model, optimizer, scheduler, epochs, global_step=0, output_
           best_test=0, best_val=0, info=collections.defaultdict(dict), tb_writer=None):
     
     def add_scalar_(name: str, arg1, arg2):
-        if torch.is_tensor(arg1) and torch.is_tensor(arg1[0]):
-            tb_writer.add_scalar(name, arg1[0][0], arg2)
-        elif torch.is_tensor(arg1):
-            tb_writer.add_scalar(name, arg1[0], arg2)
+        if torch.is_tensor(arg1):
+            if arg1.dim() == 0:  # Check for 0-dimensional tensor
+                tb_writer.add_scalar(name, arg1.item(), arg2)
+            elif arg1.dim() == 1:  # Check for 1-dimensional tensor
+                tb_writer.add_scalar(name, arg1[0].item(), arg2)
+            else:
+                # Handle other dimensions if necessary
+                pass
         else:
             tb_writer.add_scalar(name, arg1, arg2)
     
@@ -288,7 +292,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--aug', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=200) # 200
+    parser.add_argument('--epochs', type=int, default=100) # 200
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--eval-batch-size', type=int, default=512)
     parser.add_argument('--pause-every', type=int, default=200) 
