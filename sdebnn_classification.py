@@ -22,7 +22,9 @@ def train(model, ema_model, optimizer, scheduler, epochs, global_step=0, output_
           best_test=0, best_val=0, info=collections.defaultdict(dict), tb_writer=None):
     
     def add_scalar_(name: str, arg1, arg2):
-        if torch.is_tensor(arg1):
+        if torch.is_tensor(arg1) and torch.is_tensor(arg1[0]):
+            tb_writer.add_scalar(name, arg1[0][0], arg2)
+        elif torch.is_tensor(arg1):
             tb_writer.add_scalar(name, arg1[0], arg2)
         else:
             tb_writer.add_scalar(name, arg1, arg2)
@@ -132,9 +134,9 @@ def train(model, ema_model, optimizer, scheduler, epochs, global_step=0, output_
                     f" | Test accuracy {test_accuracy} | Test EMA accuracy {test_accuracy_ema}" + \
                     f" | Train NLL {train_xent.val} | Test NLL {test_xent} | Test EMA NLL {test_xent_ema} | Train "
                     f"Loss " + \
-                    f" {obj.detach().cpu().numpy().tolist()} | Train KL {kl}" + \
+                    f" {obj.mean().detach().cpu().numpy().tolist()} | Train KL {kl}" + \
                     f" | Train ECE {ece.val} | Test ECE {test_ece} | Test ECE EMA {test_ece_ema}" + \
-                    f" | Train nfes {nfe.val} | Test NFE {test_nfe} | Test NFE EMA {test_nfe_ema}\n")
+                    f" | Train nfes {nfe.val} | Test NFE {test_nfe} | Test NFE EMA {test_nfe_ema}\n") # changes Train Loss obj.mean()
             logging.warning(f"Wrote epoch info to {os.path.join(output_dir, 'results.txt')}")
         info[global_step] = {'epoch': epoch, 'time': epoch_time, 'train_acc': train_accuracy.val,
                              'test_acc': test_accuracy,
@@ -215,6 +217,7 @@ def main():
             blocks=tuple(map(int, args.nblocks.split("-"))),
             sigma=args.sigma,
             aug_dim=args.aug,
+            mode=args.mode,
         )
     elif args.model == "partialsdenet":
         model = models.PartialSDEnet(
@@ -227,6 +230,8 @@ def main():
             blocks=tuple(map(int, args.nblocks.split("-"))),
             sigma=args.sigma,
             aug_dim=args.aug,
+            timecut=args.timecut,
+            mode=args.mode,
         )
     else:
         raise ValueError(f"Unknown model: {args.model}")
@@ -269,20 +274,20 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train-dir', type=str, default='train', required=False)
+    parser.add_argument('--train-dir', type=str, default='train-sde-cifar', required=False)
     parser.add_argument('--seed', type=int, default=1000000)
     parser.add_argument('--no-gpu', action="store_true")
     parser.add_argument('--subset', type=int, default=None, help="Use subset of mnist data.")
-    parser.add_argument('--data', type=str, default="mnist", choices=['mnist', 'cifar10', 'cifar100'])
+    parser.add_argument('--data', type=str, default="cifar10", choices=['mnist', 'cifar10', 'cifar100'])
     parser.add_argument('--pin-memory', type=utils.str2bool, default=True)
     parser.add_argument('--num-workers', type=int, default=8)
-    parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn', 'partialsdenet'], default='partialsdenet')
+    parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn', 'partialsdenet'], default='sdebnn')
     parser.add_argument('--method', type=str, choices=['milstein', 'midpoint', "heun", "euler_heun"], default='midpoint')
     parser.add_argument('--gamma', type=float, default=0.999)
 
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--aug', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=2) # 200
+    parser.add_argument('--epochs', type=int, default=200) # 200
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--eval-batch-size', type=int, default=512)
     parser.add_argument('--pause-every', type=int, default=200) 
@@ -304,6 +309,8 @@ if __name__ == "__main__":
     parser.add_argument('--fw-width', type=str, default="1-128-1")
     parser.add_argument('--nblocks', type=str, default="2-2-2")
     parser.add_argument('--sigma', type=float, default=0.1)
+    parser.add_argument('--mode', type=int, default=0) # Mode: 1 for MNIST; 0 for cifar10
+    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
 
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--nesterov', type=utils.str2bool, default=True)

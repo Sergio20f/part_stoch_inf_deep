@@ -29,7 +29,8 @@ def make_y_net(input_size,
                verbose=False,
                explicit_params=True,
                hidden_width=128,
-               aug_dim=0):
+               aug_dim=0,
+               mode=0):
     
     """This is the bayesian neural network"""
 
@@ -41,7 +42,8 @@ def make_y_net(input_size,
             layers.extend(diffeq_layers.make_ode_k3_block_layers(input_size=_input_size,
                                                                  activation=activation,
                                                                  last_activation=i < len(blocks) or j < num_blocks,
-                                                                 hidden_width=hidden_width, mode=1)) # mode 1 for MNIST
+                                                                 hidden_width=hidden_width,
+                                                                 mode=mode)) # mode 1 for MNIST; 0 for cifar10
 
             if verbose:
                 if i == 1:
@@ -121,7 +123,8 @@ class SDENet(torchsde.SDEStratonovich):
                  inhomogeneous=True,
                  sigma=0.1,
                  hidden_width=128,
-                 aug_dim=0):
+                 aug_dim=0,
+                 mode=0):
         super(SDENet, self).__init__(noise_type="diagonal")
         self.input_size = input_size
         self.aug_input_size = (aug_dim + input_size[0], *input_size[1:])
@@ -135,7 +138,8 @@ class SDENet(torchsde.SDEStratonovich):
             activation=activation,
             verbose=verbose,
             hidden_width=hidden_width,
-            aug_dim=aug_dim
+            aug_dim=aug_dim,
+            mode=mode,
         )
         # Create network evolving weights.
         initial_params = self.y_net.make_initial_params()  # w0.
@@ -158,6 +162,7 @@ class SDENet(torchsde.SDEStratonovich):
             nn.Linear(int(np.prod(self.output_size)), 1024),
             nn.ReLU(inplace=True),
             nn.Linear(1024, num_classes),
+            #nn.Softmax(dim=1), # Add softmax activation
         )
 
         self.register_buffer('ts', torch.tensor([0., 1.]))
@@ -228,8 +233,8 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                 sigma=0.1,
                 hidden_width=128,
                 aug_dim=0,
-                timecut=0.1):
-        
+                timecut=0.1,
+                mode=0):
         # Noise type is diagonal means that the noise is independent across dimensions
         super(PartialSDEnet, self).__init__(noise_type="diagonal")
 
@@ -244,7 +249,8 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                                                   activation=activation,
                                                   verbose=verbose,
                                                   hidden_width=hidden_width,
-                                                  aug_dim=aug_dim)
+                                                  aug_dim=aug_dim,
+                                                  mode=mode) # mode 1 for MNIST; 0 for cifar10
         
         # Create network evolving weights.
         initial_params = self.y_net.make_initial_params()                            # extracts w0 from the y_net
@@ -265,7 +271,9 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                                         # nn.Linear(int(np.prod(self.output_size)), num_classes), # option: projection w/o ReLU
                                         nn.Linear(int(np.prod(self.output_size)), 1024),
                                         nn.ReLU(inplace=True),
-                                        nn.Linear(1024, num_classes))
+                                        nn.Linear(1024, num_classes),
+                                        #nn.Softmax(dim=1),
+                                        ) # Add softmax activation
 
         # Initialise time steps 
         self.timecut = timecut
@@ -343,16 +351,17 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                                        cache_size=45 if adjoint else 30)  # If not adjoint, don't really need to cache.
         
         if adjoint_adaptive:
-            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
+            _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             # _, aug_y1
-            aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
+            aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
+            # print(aug_y1.shape, "aug_y1 shape else") # ([3, 1, 589513])
         
         # Compute partial logqp
         logqp = .5 * aug_y1[-1]
 
         self.sde_loop = False
-        timesteps_ode = torch.linspace(self.timecut, 1, int((1-self.timecut)//dt))
+        timesteps_ode = torch.linspace(self.timecut, 1, int((1-self.timecut)//dt)).to(aug_y.device)
 
         aug_y2 = odeint(self.f, aug_y[:, :-1].squeeze(0), timesteps_ode, method=method_ode, rtol=rtol_ode, atol=atol_ode)
 
