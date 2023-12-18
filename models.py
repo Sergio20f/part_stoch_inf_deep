@@ -210,9 +210,10 @@ class SDENet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
+        
         y1 = aug_y1[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
-        logqp = .5 * aug_y1[-1]
+        logqp = .5 * aug_y1[:, -1]
         
         return logits, logqp
 
@@ -358,7 +359,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
             #print(aug_y1.shape, "aug_y1 shape else") # ([3, 1, 589513])
         
         # Compute partial logqp
-        logqp = .5 * aug_y1[-1]
+        logqp = .5 * aug_y1[:, -1]
 
         self.sde_loop = False
         timesteps_ode = torch.linspace(self.timecut, 1, int((1-self.timecut)//dt)).to(aug_y.device)
