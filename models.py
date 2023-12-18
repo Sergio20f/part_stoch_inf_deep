@@ -210,10 +210,12 @@ class SDENet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
+        
         y1 = aug_y1[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
         #logits = nn.functional.softmax(logits, dim=1)
-        logqp = .5 * aug_y1[-1]
+
+        logqp = .5 * aug_y1[:,-1]
         return logits, logqp
 
     def zero_grad(self) -> None:
@@ -234,7 +236,9 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                 hidden_width=128,
                 aug_dim=0,
                 timecut=0.1,
+                ode_first=False, 
                 mode=0):
+        
         # Noise type is diagonal means that the noise is independent across dimensions
         super(PartialSDEnet, self).__init__(noise_type="diagonal")
 
@@ -275,16 +279,20 @@ class PartialSDEnet(torchsde.SDEStratonovich):
                                         #nn.Softmax(dim=1),
                                         ) # Add softmax activation
 
-        # Initialise time steps 
+        # Initialise time steps and set forward method
         self.timecut = timecut
-        self.register_buffer('ts', torch.tensor([0., self.timecut, 1.]))
+        if ode_first:
+            self.register_buffer('ts', torch.tensor([0., 1-self.timecut, 1.]))
+            self.forward = self.forward_ode_first
+        else:
+            self.register_buffer('ts', torch.tensor([0., self.timecut, 1.]))
+            self.forward = self.forward_sde_first
 
         # Initialise sigma (noise std)
         self.sigma = sigma
         
         # Initialise number of function evaluations
         self.nfe = 0
-
 
     def f(self, t, y: torch.Tensor):
         """
@@ -329,7 +337,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         return self.y_net.make_initial_params()
 
 
-    def forward(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
+    def forward_sde_first(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
         
         # initialise number of function evaluations and boolean sde_loop
         self.nfe = 0  
@@ -354,14 +362,13 @@ class PartialSDEnet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             # _, aug_y1
-            aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
-            # print(aug_y1.shape, "aug_y1 shape else") # ([3, 1, 589513])
+            _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
         
         # Compute partial logqp
-        logqp = .5 * aug_y1[-1]
+        logqp = .5 * aug_y1[:,-1]
 
         self.sde_loop = False
-        timesteps_ode = torch.linspace(self.timecut, 1, int((1-self.timecut)//dt)).to(aug_y.device)
+        timesteps_ode = torch.linspace(self.ts[1], 1, int((1-self.ts[1])//dt)).to(aug_y.device)
 
         aug_y2 = odeint(self.f, aug_y[:, :-1].squeeze(0), timesteps_ode, method=method_ode, rtol=rtol_ode, atol=atol_ode)
 
@@ -371,6 +378,48 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         # Compute logits and logqp
         logits = self.projection(y2)
         
+        return logits, logqp
+    
+
+    def forward_ode_first(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
+        
+        # initialise number of function evaluations and boolean sde_loop
+        self.nfe = 0  
+ 
+
+        sdeint = torchsde.sdeint_adjoint if adjoint else torchsde.sdeint
+        odeint = torchdiffeq.odeint_adjoint if adjoint else torchdiffeq.odeint
+        
+        # Pointless but yeah
+        if self.aug_zeros.numel() > 0:  # Add zero channels.
+            aug_zeros = self.aug_zeros.expand(y.shape[0], *self.aug_zeros_size)
+            y = torch.cat([y, aug_zeros], dim=1) # 235200
+
+        aug_y_ode = torch.cat((y.reshape(-1), self.flat_initial_params)) # 841609: (235200, 606408, 1)
+        aug_y_ode = aug_y_ode[None] # adds a  dimension at the beginning
+
+        self.sde_loop = False
+        timesteps_ode = torch.linspace(self.ts[0], self.ts[1], int(self.ts[1]//dt)).to(aug_y_ode.device)
+
+        aug_y1 = odeint(self.f, aug_y_ode.squeeze(0), timesteps_ode, method=method_ode, rtol=rtol_ode, atol=atol_ode)
+
+        self.sde_loop = True
+        aug_y_sde = torch.cat((aug_y1[-1,:].squeeze(0), torch.tensor([0.], device=y.device))).unsqueeze(0)
+
+        # Initialise Brownian motion
+        bm = torchsde.BrownianInterval(t0=self.ts[1], t1=self.ts[2], size=aug_y_sde.shape, dtype=aug_y_sde.dtype, device=aug_y_sde.device,
+                                       cache_size=45 if adjoint else 30)  # If not adjoint, don't really need to cache.
+        
+        if adjoint_adaptive:
+            aug_y2 = sdeint(self, aug_y_sde, self.ts[1:], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
+        else:
+            _, aug_y2 = sdeint(self, aug_y_sde, self.ts[1:], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
+        
+        y1 = aug_y2[:,:y.numel()].reshape(y.size())
+        logits = self.projection(y1)
+        #logits = nn.functional.softmax(logits, dim=1)
+
+        logqp = .5 * aug_y1[:,-1]
         return logits, logqp
 
     def zero_grad(self) -> None:
