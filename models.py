@@ -210,7 +210,7 @@ class SDENet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
-        y1 = aug_y1[0,:y.numel()].reshape(y.size())
+        y1 = aug_y1[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
         #logits = nn.functional.softmax(logits, dim=1)
         logqp = .5 * aug_y1[-1]
