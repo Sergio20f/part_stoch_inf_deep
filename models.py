@@ -339,7 +339,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         aug_y = aug_y[None] # adds a  dimension at the beginning
 
         # Initialise Brownian motion
-        bm = torchsde.BrownianInterval(t0=self.ts[0], t1=self.ts[-1], size=aug_y.shape, dtype=aug_y.dtype, device=aug_y.device,
+        bm = torchsde.BrownianInterval(t0=self.ts[0], t1=self.ts[1], size=aug_y.shape, dtype=aug_y.dtype, device=aug_y.device,
                                        cache_size=45 if adjoint else 30)  # If not adjoint, don't really need to cache.
         
         if adjoint_adaptive:
