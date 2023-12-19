@@ -423,7 +423,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         y1 = aug_y2[:,:y.numel()].reshape(y.size())
         logits = self.projection(y1)
 
-        logqp = .5 * aug_y1[:, -1]
+        logqp = .5 * aug_y2[:, -1] # changed from aug_y1 to aug_y2
         return logits, logqp
 
     def zero_grad(self) -> None:
