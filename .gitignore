@@ -1,3 +1,6 @@
 __pycache__/
 train*
 nohup*
+toy_results*
+sdebnn_classification2.py
+sdebnn_classification3.py

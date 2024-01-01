@@ -98,6 +98,10 @@ def random_seed_torch(seed):
 
 
 if __name__ == "__main__":
+    # Directory for storing plots
+    plot_dir = "toy_results"
+    os.makedirs(plot_dir, exist_ok=True)
+
     torch.manual_seed(0)
 
     f_func = construct_odenet([1, 64, 64, 1])
@@ -107,7 +111,7 @@ if __name__ == "__main__":
         if hasattr(m, "weight"):
             m.weight.data *= 1.0
 
-    q_sde = VariationalSDE(f_func, partial=True)
+    q_sde = VariationalSDE(f_func, partial=False)
     optimizer = torch.optim.Adam(q_sde.parameters(), lr=2e-3, betas=(0.9, 0.999))
 
     data = [torch.tensor(5.0), torch.tensor(-5.0)]
@@ -115,7 +119,10 @@ if __name__ == "__main__":
     # Measure the time taken for 300 iterations.
     start_time = time.time()
 
-    for itr in range(300):
+    all_trajectories = []  # Store all trajectories for visualization
+    all_elbo = []  # Store all ELBO values for visualization
+
+    for itr in range(100): # 300
 
         # Sample and compute ELBO.
         n = 20
@@ -136,6 +143,8 @@ if __name__ == "__main__":
         elbo.mul(-1.0).backward()
         optimizer.step()
 
+        all_trajectories.append(z_t[-1].detach().numpy())  # Store the final state of each trajectory
+        all_elbo.append(elbo.item())  # Store the ELBO value
 
         if itr == 0 or itr == 55 or itr==299:
             print(itr, elbo.item())
@@ -143,4 +152,32 @@ if __name__ == "__main__":
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"Execution time: {execution_time} seconds")
-    
+
+    # 1. Plotting SDE trajectories in one plot
+    plt.figure()
+    for trajectory in all_trajectories:
+        plt.plot(np.linspace(q_sde.start_time, q_sde.end_time, len(trajectory)), trajectory)
+    plt.xlabel("Time")
+    plt.ylabel("State")
+    plt.title("SDE Trajectories")
+    plt.savefig(os.path.join(plot_dir, "all_trajectories.png"))
+    plt.close()
+
+    # 2. Plotting the posterior distribution (Histogram of final states)
+    plt.figure()
+    final_states = np.array(all_trajectories)[:, -1]  # Extract final states from trajectories
+    plt.hist(final_states, bins=30, density=True)
+    plt.xlabel("State")
+    plt.ylabel("Density")
+    plt.title("Posterior Distribution")
+    plt.savefig(os.path.join(plot_dir, "posterior_distribution.png"))
+    plt.close()
+
+    # 3. Plotting the ELBO
+    plt.figure()
+    plt.plot(all_elbo)
+    plt.xlabel("Iteration")
+    plt.ylabel("ELBO")
+    plt.title("Training Curve (ELBO)")
+    plt.savefig(os.path.join(plot_dir, "training_curve.png"))
+    plt.close()
