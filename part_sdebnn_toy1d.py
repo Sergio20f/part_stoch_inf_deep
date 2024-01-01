@@ -27,8 +27,7 @@ def em_solver(f, g, f_p, z0, t):
         f_t = f(t0, z_t[-1])
         g_t = g(t0, z_t[-1])
         z_t.append(z_t[-1] + f_t * dt + g_t * dW)
-        u=torch.where(g_t >= 0.001, (f_t - f_p(t0, z_t[-1])) / g_t, 0.0000001)
-        #u = (f_t - f_p(t0, z_t[-1])) / g_t
+        u = (f_t - f_p(t0, z_t[-1])) / g_t
         kldiv = kldiv + dt * torch.abs(u * u) * 0.5
     return z_t, kldiv
 
@@ -144,3 +143,4 @@ if __name__ == "__main__":
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"Execution time: {execution_time} seconds")
+    
