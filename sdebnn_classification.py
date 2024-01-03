@@ -290,12 +290,12 @@ if __name__ == "__main__":
     parser.add_argument('--method', type=str, choices=['milstein', 'midpoint', "heun", "euler_heun"], default='midpoint')
     parser.add_argument('--gamma', type=float, default=0.999)
 
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=7e-4) # MNIST: 1e-3; CIFAR: 7e-4
     parser.add_argument('--aug', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=100) # 200
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--eval-batch-size', type=int, default=512)
-    parser.add_argument('--pause-every', type=int, default=200) 
+    parser.add_argument('--pause-every', type=int, default=200)
     parser.add_argument('--eval-batches', type=int, default=10000)
 
     # Model.
@@ -310,10 +310,10 @@ if __name__ == "__main__":
     parser.add_argument('--activation', type=str, default="softplus",
                         choices=['swish', 'mish', 'softplus', 'tanh', 'relu', 'elu'])
     parser.add_argument('--verbose', type=utils.str2bool, default=False)
-    parser.add_argument('--hidden-width', type=int, default=32)
-    parser.add_argument('--fw-width', type=str, default="1-128-1")
-    parser.add_argument('--nblocks', type=str, default="2-2-2")
-    parser.add_argument('--sigma', type=float, default=0.1)
+    parser.add_argument('--hidden-width', type=int, default=64) # MNIST: 32; CIFAR: 64
+    parser.add_argument('--fw-width', type=str, default="2-128-2") # MNIST: 1-64-1; CIFAR: 2-128-2
+    parser.add_argument('--nblocks', type=str, default="2-2-2") # MNIST: 1; CIFAR: 2-2-2
+    parser.add_argument('--sigma', type=float, default=0.1) # MNIST: 0.1; CIFAR: 0.1
     parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
     parser.add_argument('--mode', type=int, default=0) # Mode: 1 for MNIST; 0 for cifar10
     parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
