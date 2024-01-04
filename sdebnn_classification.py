@@ -292,7 +292,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--lr', type=float, default=7e-4) # MNIST: 1e-3; CIFAR: 7e-4
     parser.add_argument('--aug', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=100) # 200
+    parser.add_argument('--epochs', type=int, default=200) # 200
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--eval-batch-size', type=int, default=512)
     parser.add_argument('--pause-every', type=int, default=200)

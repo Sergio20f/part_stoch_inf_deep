@@ -367,7 +367,6 @@ class PartialSDEnet(torchsde.SDEStratonovich):
             _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
         else:
             _, aug_y1 = sdeint(self, aug_y, self.ts[:2], bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol_ode, atol=atol_ode)
-            #print(aug_y1.shape, "aug_y1 shape else")
         
         # Compute partial logqp
         logqp = .5 * aug_y1[:, -1]
