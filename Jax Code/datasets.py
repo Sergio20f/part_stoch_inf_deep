@@ -18,7 +18,7 @@ import numpy.random as npr
 import tensorflow as tf
 import tensorflow_datasets as tfds
 from registry import add_data
-#from jax.api import vmap
+from jax import vmap
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, MNIST
@@ -318,123 +318,123 @@ def load_mnist(seed, batch_size, test_batch_size, num_epochs):
 
   return ds_train, ds_test_eval, meta
 
-################## 1D regression #######################
+################# 1D regression #######################
 
-# def sample_noise(key, n_data):
-#   """Gaussian noise."""
-#   rngs = jax.random.split(key, n_data)
-#   noise = vmap(random.normal, (0, None), 0)(rngs, (1,))
-#   assert len(noise) == n_data
-#   return noise.squeeze()
+def sample_noise(key, n_data):
+  """Gaussian noise."""
+  rngs = jax.random.split(key, n_data)
+  noise = vmap(random.normal, (0, None), 0)(rngs, (1,))
+  assert len(noise) == n_data
+  return noise.squeeze()
 
-# @add_data('b20')
-# def b20_toy1d_dataset(key, test_n_data, batch_size, n_data=20, x_lim=[-2, 2], noise_std=3):
-#   subkeys = jax.random.split(key, n_data)
-#   inputs = np.concatenate([np.linspace(x_lim[0], -0.5, num=n_data//2),
-#                           np.linspace(0, x_lim[-1], num=n_data//2)])
-#   noise = sample_noise(key, n_data) * noise_std
-#   true_fn = lambda x: x**3
-#   targets = true_fn(inputs) + noise
-#   inputs, targets = inputs[..., None], targets[..., None]
-#   print('plot sample-20 inputs: {} targets: {}'.format(inputs.shape, targets.shape))
+@add_data('b20')
+def b20_toy1d_dataset(key, test_n_data, batch_size, n_data=20, x_lim=[-2, 2], noise_std=3):
+  subkeys = jax.random.split(key, n_data)
+  inputs = np.concatenate([np.linspace(x_lim[0], -0.5, num=n_data//2),
+                          np.linspace(0, x_lim[-1], num=n_data//2)])
+  noise = sample_noise(key, n_data) * noise_std
+  true_fn = lambda x: x**3
+  targets = true_fn(inputs) + noise
+  inputs, targets = inputs[..., None], targets[..., None]
+  print('plot sample-20 inputs: {} targets: {}'.format(inputs.shape, targets.shape))
 
-#   # test set for evaluation
-#   D = inputs.shape[-1]
-#   print("D", D)
-#   test_x0 = np.repeat(
-#       np.expand_dims(np.linspace(x_lim[0] - 2, x_lim[1] + 2, test_n_data), axis=1), D, axis=1)  # (N, D)
-#   test_x1 = np.repeat(np.expand_dims(true_fn(test_x0[:, 0]), axis=1), D, axis=1) # (N, D)
-#   test = (test_x0, test_x1)
+  # test set for evaluation
+  D = inputs.shape[-1]
+  print("D", D)
+  test_x0 = np.repeat(
+      np.expand_dims(np.linspace(x_lim[0] - 2, x_lim[1] + 2, test_n_data), axis=1), D, axis=1)  # (N, D)
+  test_x1 = np.repeat(np.expand_dims(true_fn(test_x0[:, 0]), axis=1), D, axis=1) # (N, D)
+  test = (test_x0, test_x1)
 
-#   def get_batch(key, test_n_data, batch_size, D=1):
-#     assert test_n_data % batch_size == 0
-#     num_batches = test_n_data / batch_size
-#     # return key so that we don't affect training potentially
-#     key, subkey = jax.random.split(key)
-#     batch_x = jax.random.uniform(subkey, (batch_size, D), minval=x_lim[0], maxval=x_lim[1]) # (bs, D)
-#     batch_y = np.repeat(true_fn(batch_x[:, 0])[..., None], D, axis=1) # (bs, D)
+  def get_batch(key, test_n_data, batch_size, D=1):
+    assert test_n_data % batch_size == 0
+    num_batches = test_n_data / batch_size
+    # return key so that we don't affect training potentially
+    key, subkey = jax.random.split(key)
+    batch_x = jax.random.uniform(subkey, (batch_size, D), minval=x_lim[0], maxval=x_lim[1]) # (bs, D)
+    batch_y = np.repeat(true_fn(batch_x[:, 0])[..., None], D, axis=1) # (bs, D)
 
-#     return key, (batch_x, batch_y)
+    return key, (batch_x, batch_y)
 
-#   return inputs, targets, test, get_batch, noise_std
+  return inputs, targets, test, get_batch, noise_std
 
-# @add_data('b40')
-# def b40_toy1d_dataset(key, data_size, batch_size, n_data=40, x_lim=[-4, 4], noise_std=3):
-#   """x^3 invertible function with added Gaussian noise.
-#   Return:
-#     (inputs, targets) are for plotting/visualization
-#     get_batch: function for getting another randomly selected batch of data
-#   """
-#   subkeys = jax.random.split(key, n_data)
-#   inputs = np.concatenate([np.linspace(-4, -3, num=n_data//2),
-#                           np.linspace(-2.5, -1, num=n_data//5),
-#                           np.linspace(-1, 2, num=n_data//5),
-#                           np.linspace(2, 4, num=n_data//2)])
-#   noise = sample_noise(key, inputs.shape[0])
-#   # print(noise)
-#   true_fn = lambda x: x ** 3
-#   targets = true_fn(inputs) + noise * noise_std
-#   inputs = inputs[..., None]
-#   targets = targets[..., None]
-#   print('plot sample-gap-40 inputs: {} targets: {}'.format(inputs.shape, targets.shape))
+@add_data('b40')
+def b40_toy1d_dataset(key, data_size, batch_size, n_data=40, x_lim=[-4, 4], noise_std=3):
+  """x^3 invertible function with added Gaussian noise.
+  Return:
+    (inputs, targets) are for plotting/visualization
+    get_batch: function for getting another randomly selected batch of data
+  """
+  subkeys = jax.random.split(key, n_data)
+  inputs = np.concatenate([np.linspace(-4, -3, num=n_data//2),
+                          np.linspace(-2.5, -1, num=n_data//5),
+                          np.linspace(-1, 2, num=n_data//5),
+                          np.linspace(2, 4, num=n_data//2)])
+  noise = sample_noise(key, inputs.shape[0])
+  # print(noise)
+  true_fn = lambda x: x ** 3
+  targets = true_fn(inputs) + noise * noise_std
+  inputs = inputs[..., None]
+  targets = targets[..., None]
+  print('plot sample-gap-40 inputs: {} targets: {}'.format(inputs.shape, targets.shape))
 
-#   # test set for evaluation
-#   D = inputs.shape[-1]
-#   test_x0 = np.repeat(
-#       np.expand_dims(np.linspace(x_lim[0] - 2, x_lim[1] + 2, data_size), axis=1), D, axis=1)  # (N, D)
-#   test_x1 = np.repeat(np.expand_dims(true_fn(test_x0[:, 0]), axis=1), D, axis=1) # (N, D)
-#   test = (test_x0, test_x1)
+  # test set for evaluation
+  D = inputs.shape[-1]
+  test_x0 = np.repeat(
+      np.expand_dims(np.linspace(x_lim[0] - 2, x_lim[1] + 2, data_size), axis=1), D, axis=1)  # (N, D)
+  test_x1 = np.repeat(np.expand_dims(true_fn(test_x0[:, 0]), axis=1), D, axis=1) # (N, D)
+  test = (test_x0, test_x1)
 
-#   def get_batch(key, data_size, batch_size, D=1):
-#     assert data_size % batch_size == 0
-#     num_batches = data_size / batch_size
-#     # return key so that we don't affect training potentially
-#     key, subkey = jax.random.split(key)
-#     batch_x = jax.random.uniform(subkey, (batch_size, D), minval=x_lim[0], maxval=x_lim[1]) # (bs, D)
-#     batch_y = np.repeat(true_fn(batch_x[:, 0])[..., None], D, axis=1) # (bs, D)
+  def get_batch(key, data_size, batch_size, D=1):
+    assert data_size % batch_size == 0
+    num_batches = data_size / batch_size
+    # return key so that we don't affect training potentially
+    key, subkey = jax.random.split(key)
+    batch_x = jax.random.uniform(subkey, (batch_size, D), minval=x_lim[0], maxval=x_lim[1]) # (bs, D)
+    batch_y = np.repeat(true_fn(batch_x[:, 0])[..., None], D, axis=1) # (bs, D)
 
-#     return key, (batch_x, batch_y)
+    return key, (batch_x, batch_y)
 
-#   return inputs, targets, test, get_batch, noise_std
+  return inputs, targets, test, get_batch, noise_std
 
-# @add_data('b40gap')
-# def b40_toy1d_dataset(key, data_size, batch_size, x_lim=[-4, 4], n_data=40, noise_std=3):
-#   """x^3 invertible function with added Gaussian noise.
-#   Return:
-#     (inputs, targets) are for plotting/visualization
-#     get_batch: function for getting another randomly selected batch of data
-#     noise_std: 3 based on a paper's recommendations
-#   """
-#   subkeys = jax.random.split(key, n_data)
-#   inputs = np.concatenate([np.linspace(-4, -3, num=n_data//4),
-#                           np.linspace(-2.5, -1, num=n_data//4),
-#                           np.linspace(1, 2, num=n_data//4),
-#                           np.linspace(3, 4, num=n_data//4)])
-#   noise = sample_noise(key, n_data) # n_data if split uniformly
-#   # print(noise)
-#   true_fn = lambda x: x ** 3
-#   targets = true_fn(inputs) + noise * noise_std
-#   inputs = inputs[..., None]
-#   targets = targets[..., None]
-#   print('plot sample-40 inputs: {} targets: {}'.format(inputs.shape, targets.shape))
+@add_data('b40gap')
+def b40_toy1d_dataset(key, data_size, batch_size, x_lim=[-4, 4], n_data=40, noise_std=3):
+  """x^3 invertible function with added Gaussian noise.
+  Return:
+    (inputs, targets) are for plotting/visualization
+    get_batch: function for getting another randomly selected batch of data
+    noise_std: 3 based on a paper's recommendations
+  """
+  subkeys = jax.random.split(key, n_data)
+  inputs = np.concatenate([np.linspace(-4, -3, num=n_data//4),
+                          np.linspace(-2.5, -1, num=n_data//4),
+                          np.linspace(1, 2, num=n_data//4),
+                          np.linspace(3, 4, num=n_data//4)])
+  noise = sample_noise(key, n_data) # n_data if split uniformly
+  # print(noise)
+  true_fn = lambda x: x ** 3
+  targets = true_fn(inputs) + noise * noise_std
+  inputs = inputs[..., None]
+  targets = targets[..., None]
+  print('plot sample-40 inputs: {} targets: {}'.format(inputs.shape, targets.shape))
 
-#   # test set for evaluation
-#   D = inputs.shape[-1]
-#   test_x0 = np.repeat(
-#       np.expand_dims(np.linspace(x_lim[0], x_lim[1], data_size), axis=1), D, axis=1)  # (N, D)
-#   test_x1 = np.repeat(np.expand_dims(true_fn(test_x0[:, 0]), axis=1), D, axis=1) # (N, D)
-#   test = (test_x0, test_x1)
+  # test set for evaluation
+  D = inputs.shape[-1]
+  test_x0 = np.repeat(
+      np.expand_dims(np.linspace(x_lim[0], x_lim[1], data_size), axis=1), D, axis=1)  # (N, D)
+  test_x1 = np.repeat(np.expand_dims(true_fn(test_x0[:, 0]), axis=1), D, axis=1) # (N, D)
+  test = (test_x0, test_x1)
 
-#   def get_batch(key, data_size, batch_size, D=1):
-#     assert data_size % batch_size == 0
-#     num_batches = data_size / batch_size
-#     key, subkey = jax.random.split(key)
-#     batch_x = jax.random.uniform(subkey, (batch_size, D), minval=x_lim[0], maxval=x_lim[1]) # (bs, D)
-#     batch_y = np.repeat(true_fn(batch_x[:, 0])[..., None], D, axis=1) # (bs, D)
+  def get_batch(key, data_size, batch_size, D=1):
+    assert data_size % batch_size == 0
+    num_batches = data_size / batch_size
+    key, subkey = jax.random.split(key)
+    batch_x = jax.random.uniform(subkey, (batch_size, D), minval=x_lim[0], maxval=x_lim[1]) # (bs, D)
+    batch_y = np.repeat(true_fn(batch_x[:, 0])[..., None], D, axis=1) # (bs, D)
 
-#     return key, (batch_x, batch_y)
+    return key, (batch_x, batch_y)
 
-#   return inputs, targets, test, get_batch, noise_std
+  return inputs, targets, test, get_batch, noise_std
 
 if __name__ == "__main__":
   key = random.PRNGKey(0)
