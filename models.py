@@ -112,7 +112,8 @@ class BaselineYNet(nn.Module):
 
 
 # TODO: add STL
-class SDENet(torchsde.SDEStratonovich):
+#class SDENet(torchsde.SDEStratonovich):
+class SDENet(torchsde.SDEIto):
     def __init__(self,
                  input_size=(3, 32, 32),
                  blocks=(2, 2, 2),
@@ -193,7 +194,7 @@ class SDENet(torchsde.SDEStratonovich):
     def make_initial_params(self):
         return self.y_net.make_initial_params()
 
-    def forward(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3):
+    def forward(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="euler", rtol=1e-4, atol=1e-3): # method="midpoint"
         # Note: This works correctly, as long as we are requesting the nfe after each gradient update.
         #  There are obviously cleaner ways to achieve this.
         self.nfe = 0    
@@ -227,7 +228,8 @@ class SDENet(torchsde.SDEStratonovich):
         for p in self.parameters(): p.grad = None
 
 
-class PartialSDEnet(torchsde.SDEStratonovich):
+#class PartialSDEnet(torchsde.SDEStratonovich):
+class PartialSDEnet(torchsde.SDEIto):
 
     def __init__(self,
                 input_size=(3, 32, 32),
@@ -342,7 +344,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         return self.y_net.make_initial_params()
 
 
-    def forward_sde_first(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
+    def forward_sde_first(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="euler", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
         
         # initialise number of function evaluations and boolean sde_loop
         self.nfe = 0  
@@ -385,7 +387,7 @@ class PartialSDEnet(torchsde.SDEStratonovich):
         return logits, logqp
     
 
-    def forward_ode_first(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="midpoint", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
+    def forward_ode_first(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="euler", rtol=1e-4, atol=1e-3, return_sde_resuts=False, method_ode="midpoint", rtol_ode=1e-4, atol_ode=1e-3):
         
         # initialise number of function evaluations and boolean sde_loop
         self.nfe = 0  

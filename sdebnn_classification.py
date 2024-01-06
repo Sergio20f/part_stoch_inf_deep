@@ -287,7 +287,7 @@ if __name__ == "__main__":
     parser.add_argument('--pin-memory', type=utils.str2bool, default=True)
     parser.add_argument('--num-workers', type=int, default=8)
     parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn', 'partialsdenet'], default='sdebnn')
-    parser.add_argument('--method', type=str, choices=['milstein', 'midpoint', "heun", "euler_heun"], default='midpoint')
+    parser.add_argument('--method', type=str, choices=['milstein', 'midpoint', "heun", "euler_heun", "euler"], default='euler')
     parser.add_argument('--gamma', type=float, default=0.999)
 
     parser.add_argument('--lr', type=float, default=7e-4) # MNIST: 1e-3; CIFAR: 7e-4
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     parser.add_argument('--fw-width', type=str, default="2-128-2") # MNIST: 1-64-1; CIFAR: 2-128-2
     parser.add_argument('--nblocks', type=str, default="2-2-2") # MNIST: 1; CIFAR: 2-2-2
     parser.add_argument('--sigma', type=float, default=0.1) # MNIST: 0.1; CIFAR: 0.1
-    parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
+    parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
     parser.add_argument('--mode', type=int, default=0) # Mode: 1 for MNIST; 0 for cifar10
     parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
 
