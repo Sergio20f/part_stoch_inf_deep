@@ -21,6 +21,7 @@ def SDEBNN(fx_block_type,
            stl=False,
            xt=False,
            nsteps=20,
+           dt=1e-6, # as default in sdeint_ito_fixed_grid
            remat=False,
            w_drift=True,
            stax_api=False,
@@ -110,7 +111,7 @@ def SDEBNN(fx_block_type,
             y0 = jnp.concatenate([x.reshape(-1), init_w0.reshape(-1), jnp.zeros(init_w0.shape).reshape(-1)])
             rep = w_dim if stl else 0  # STL
             if fixed_grid:
-                ys = sdeint_ito_fixed_grid(f_aug, g_aug, y0, ts, rng, fw_params, method="euler_maruyama", rep=rep)
+                ys = sdeint_ito_fixed_grid(f_aug, g_aug, y0, ts, rng, fw_params, dt=dt, method="euler_maruyama", rep=rep)
             else:
                 print("using stochastic adjoint")
                 ys = sdeint_ito(f_aug, g_aug, y0, ts, rng, fw_params, method="euler_maruyama", rep=rep)
@@ -205,6 +206,7 @@ def bnn_serial(*layers):
         total_kl = 0
         infodict = {}
         for fun, param, rng in zip(apply_funs, params, rngs):
+            print(f"Before layer: input shape {inputs.shape}")
             output = fun(param, inputs, rng=rng, **kwargs)
             if len(output) == 2:
                 inputs, layer_kl = output
@@ -214,6 +216,7 @@ def bnn_serial(*layers):
             else:
                 raise RuntimeError(f"Expected 2 or 3 outputs but got {len(output)}.")
             total_kl = total_kl + layer_kl
+            print(f"After layer: output shape {inputs.shape}")
         return inputs, total_kl, infodict
 
     return Layer(init_fun, apply_fun)

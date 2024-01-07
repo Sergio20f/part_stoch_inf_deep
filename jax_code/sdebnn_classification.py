@@ -104,7 +104,7 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
         n_total = n_total + batch_total
         nll = nll + batch_nll
         kl = kl + batch_kl
-    return n_correct / n_total, jnp.stack(logits, axis=0), labels, nll / n_total, kl / n_total, jnp.stack(wts, axis=0)
+    return n_correct / n_total, jnp.stack(logits, axis=0), labels, nll / n_total, kl / n_total, jnp.stack(wts, axis=0), inputs.shape
 
 
 if __name__ == "__main__":
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     parser.add_argument("--w_init", type=float, default=-1., help="scale the last layer W init of w_net. default: $(default)")
     parser.add_argument("--b_init", type=float, default=-1., help="scale the last layer b init of w_net. default: $(default)")
     parser.add_argument("--p_init", type=float, default=-1., help="scale the output of w_net by exp(p) so that diffusion doesn't overpower. default: $(default)")
-    parser.add_argument('--pause-every', type=int, default=200)
+    parser.add_argument('--pause-every', type=int, default=20) # 200
 
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
@@ -300,12 +300,12 @@ if __name__ == "__main__":
             global_step += 1
             if global_step % args.pause_every == 0:
                 # Evaluate the model with current parameters
-                val_accuracy, val_logits, val_labels, val_nll, val_kl, val_wts = evaluate(
+                val_accuracy, val_logits, val_labels, val_nll, val_kl, val_wts, input_shape = evaluate(
                     get_params(opt_state), val_loader, input_size, args.nsamples, rng_generator, args.kl_coef
                 )
 
                 # Evaluate the model with EMA parameters
-                val_accuracy_ema, val_logits_ema, val_labels_ema, val_nll_ema, val_kl_ema, val_wts_ema = evaluate(
+                val_accuracy_ema, val_logits_ema, val_labels_ema, val_nll_ema, val_kl_ema, val_wts_ema, input_shape_2 = evaluate(
                     ema_params, val_loader, input_size, args.nsamples, rng_generator, args.kl_coef
                 )
                 
@@ -341,6 +341,10 @@ if __name__ == "__main__":
                     }
                     # Save checkpoint
                     utils.save_params(checkpoint_state, os.path.join(output_dir, f"best_model_checkpoint.pkl"), pkl=True)
+                    logging.info(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')}")
+                
+                logging.warning('input shape', input_shape)
+                logging.warning('input shape 2', input_shape_2)
 
                 logging.info(
                     f"Global step: {global_step}, Epoch: {epoch}, "
