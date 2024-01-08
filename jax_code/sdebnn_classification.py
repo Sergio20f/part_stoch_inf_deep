@@ -214,6 +214,7 @@ if __name__ == "__main__":
         layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
 
         init_random_params, _predict = brax.bnn_serial(*layers)
+        logging.warning("_ type", type(init_random_params))
 
     lr = args.lr if args.lr_sched == "constant" else utils.get_lr_schedule(args.lr_sched, num_batches, args.lr)
     opt_init, opt_update, get_params = optimizers.adam(lr)
@@ -342,9 +343,6 @@ if __name__ == "__main__":
                     # Save checkpoint
                     utils.save_params(checkpoint_state, os.path.join(output_dir, f"best_model_checkpoint.pkl"), pkl=True)
                     logging.info(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')}")
-                
-                logging.warning('input shape', input_shape)
-                logging.warning('input shape 2', input_shape_2)
 
                 logging.info(
                     f"Global step: {global_step}, Epoch: {epoch}, "

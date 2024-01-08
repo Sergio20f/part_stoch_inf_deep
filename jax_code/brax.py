@@ -206,7 +206,6 @@ def bnn_serial(*layers):
         total_kl = 0
         infodict = {}
         for fun, param, rng in zip(apply_funs, params, rngs):
-            print(f"Before layer: input shape {inputs.shape}")
             output = fun(param, inputs, rng=rng, **kwargs)
             if len(output) == 2:
                 inputs, layer_kl = output
@@ -216,7 +215,6 @@ def bnn_serial(*layers):
             else:
                 raise RuntimeError(f"Expected 2 or 3 outputs but got {len(output)}.")
             total_kl = total_kl + layer_kl
-            print(f"After layer: output shape {inputs.shape}")
         return inputs, total_kl, infodict
 
     return Layer(init_fun, apply_fun)
