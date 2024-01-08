@@ -104,7 +104,7 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
         n_total = n_total + batch_total
         nll = nll + batch_nll
         kl = kl + batch_kl
-    return n_correct / n_total, jnp.stack(logits, axis=0), labels, nll / n_total, kl / n_total, jnp.stack(wts, axis=0), inputs.shape
+    return n_correct / n_total, jnp.stack(logits, axis=0), labels, nll / n_total, kl / n_total, jnp.stack(wts, axis=0)
 
 
 if __name__ == "__main__":
@@ -300,12 +300,12 @@ if __name__ == "__main__":
             global_step += 1
             if global_step % args.pause_every == 0:
                 # Evaluate the model with current parameters
-                val_accuracy, val_logits, val_labels, val_nll, val_kl, val_wts, input_shape = evaluate(
+                val_accuracy, val_logits, val_labels, val_nll, val_kl, val_wts = evaluate(
                     get_params(opt_state), val_loader, input_size, args.nsamples, rng_generator, args.kl_coef
                 )
 
                 # Evaluate the model with EMA parameters
-                val_accuracy_ema, val_logits_ema, val_labels_ema, val_nll_ema, val_kl_ema, val_wts_ema, input_shape_2 = evaluate(
+                val_accuracy_ema, val_logits_ema, val_labels_ema, val_nll_ema, val_kl_ema, val_wts_ema = evaluate(
                     ema_params, val_loader, input_size, args.nsamples, rng_generator, args.kl_coef
                 )
                 
