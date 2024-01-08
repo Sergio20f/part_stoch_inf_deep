@@ -121,7 +121,7 @@ if __name__ == "__main__":
     parser.add_argument("--w_init", type=float, default=-1., help="scale the last layer W init of w_net. default: $(default)")
     parser.add_argument("--b_init", type=float, default=-1., help="scale the last layer b init of w_net. default: $(default)")
     parser.add_argument("--p_init", type=float, default=-1., help="scale the output of w_net by exp(p) so that diffusion doesn't overpower. default: $(default)")
-    parser.add_argument('--pause-every', type=int, default=20) # 200
+    parser.add_argument('--pause-every', type=int, default=200)
 
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
@@ -214,7 +214,6 @@ if __name__ == "__main__":
         layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
 
         init_random_params, _predict = brax.bnn_serial(*layers)
-        logging.warning("_ type", type(init_random_params))
 
     lr = args.lr if args.lr_sched == "constant" else utils.get_lr_schedule(args.lr_sched, num_batches, args.lr)
     opt_init, opt_update, get_params = optimizers.adam(lr)
