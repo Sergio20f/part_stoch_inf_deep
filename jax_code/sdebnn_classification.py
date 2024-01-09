@@ -109,7 +109,7 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SDE-BNN CIFAR10 Training")
-    parser.add_argument("--model", type=str, choices=["resnet", "sdenet"], default="sdenet")
+    parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
     parser.add_argument("--output", type=str, default="./output", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--stl", action="store_true")
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     parser.add_argument("--w_init", type=float, default=-1., help="scale the last layer W init of w_net. default: $(default)")
     parser.add_argument("--b_init", type=float, default=-1., help="scale the last layer b init of w_net. default: $(default)")
     parser.add_argument("--p_init", type=float, default=-1., help="scale the output of w_net by exp(p) so that diffusion doesn't overpower. default: $(default)")
-    parser.add_argument('--pause-every', type=int, default=200)
+    parser.add_argument('--pause-every', type=int, default=5) # 200
 
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
@@ -172,7 +172,8 @@ if __name__ == "__main__":
                             actfn=stax.Relu)
         resnet = stax.serial(*layers, stax.Flatten, stax.Dense(10), stax.LogSoftmax)
         init_random_params, _predict = brax.bnn_serial(mf(resnet))
-    else:
+    
+    elif args.model == "sdenet":
         # SDE BNN.
         fw_dims = list(map(int, args.fw_dims.split("-")))
 
@@ -208,6 +209,49 @@ if __name__ == "__main__":
                                            w_drift=not args.no_drift,
                                            infer_initial_state=args.infer_w0,
                                            initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
+                ])
+            if i < len(nblocks) - 1:
+                layers.append(mf(arch.SqueezeDownsample(2)))
+        layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
+
+        init_random_params, _predict = brax.bnn_serial(*layers)
+
+    else:
+        # SDE BNN.
+        fw_dims = list(map(int, args.fw_dims.split("-")))
+
+        layers = [mf(arch.Augment(args.aug))]
+        nblocks = list(map(int, args.nblocks.split("-")))
+        for i, nb in enumerate(nblocks):
+            fw = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # weight network is time dependent
+            if args.meanfield_sdebnn:
+                layers.extend([mf(brax.PSDEBNN(args.block_type,
+                                                args.fx_dim,
+                                                args.fx_actfn,
+                                                fw,
+                                                diff_coef=args.diff_coef,
+                                                stl=args.stl,
+                                                xt=args.no_xt,
+                                                nsteps=args.nsteps,
+                                                remat=args.remat,
+                                                w_drift=not args.no_drift,
+                                                stax_api=True,
+                                                infer_initial_state=args.infer_w0,
+                                                initial_state_prior_std=args.w0_prior_std)) for _ in range(nb)
+                ])
+            else:
+                layers.extend([brax.PSDEBNN(args.block_type,
+                                            args.fx_dim,
+                                            args.fx_actfn,
+                                            fw,
+                                            diff_coef=args.diff_coef,
+                                            stl=args.stl,
+                                            xt=args.no_xt,
+                                            nsteps=args.nsteps,
+                                            remat=args.remat,
+                                            w_drift=not args.no_drift,
+                                            infer_initial_state=args.infer_w0,
+                                            initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
                 ])
             if i < len(nblocks) - 1:
                 layers.append(mf(arch.SqueezeDownsample(2)))
@@ -341,6 +385,7 @@ if __name__ == "__main__":
                     }
                     # Save checkpoint
                     utils.save_params(checkpoint_state, os.path.join(output_dir, f"best_model_checkpoint.pkl"), pkl=True)
+                    logging.info(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')}")
 
                 logging.info(
                     f"Global step: {global_step}, Epoch: {epoch}, "

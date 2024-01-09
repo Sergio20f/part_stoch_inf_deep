@@ -431,6 +431,244 @@ class PartialSDEnet(torchsde.SDEIto):
         for p in self.parameters(): p.grad = None
 
 
+
+# TODO: add STL
+#class SDENet(torchsde.SDEStratonovich):
+class SDENet2(torchsde.SDEIto):
+    def __init__(self,
+                 input_size=(3, 32, 32),
+                 blocks=(2, 2, 2),
+                 weight_network_sizes=(1, 64, 1),
+                 num_classes=10,
+                 activation="softplus",
+                 verbose=False,
+                 inhomogeneous=True,
+                 sigma=0.1,
+                 hidden_width=128,
+                 aug_dim=0,
+                 mode=0):
+        super(SDENet, self).__init__(noise_type="diagonal")
+        self.input_size = input_size
+        self.aug_input_size = (aug_dim + input_size[0], *input_size[1:])
+        self.aug_zeros_size = (aug_dim, *input_size[1:])
+        self.register_buffer('aug_zeros', torch.zeros(size=(1, *self.aug_zeros_size)))
+
+        # Create network evolving state.
+        self.y_net, self.output_size = make_y_net(
+            input_size=input_size,
+            blocks=blocks,
+            activation=activation,
+            verbose=verbose,
+            hidden_width=hidden_width,
+            aug_dim=aug_dim,
+            mode=mode,
+        )
+        # Create network evolving weights.
+        initial_params = self.y_net.make_initial_params()  # w0.
+        flat_initial_params, unravel_params = utils.ravel_pytree(initial_params)
+        self.flat_initial_params = nn.Parameter(flat_initial_params, requires_grad=True)
+        self.params_size = flat_initial_params.numel()
+        print(f"initial_params ({self.params_size}): {flat_initial_params.shape}")
+        self.unravel_params = unravel_params
+        self.w_net = make_w_net(
+            in_features=self.params_size,
+            hidden_sizes=weight_network_sizes,
+            activation="tanh",
+            inhomogeneous=inhomogeneous
+        )
+
+        # Final projection layer.
+        self.projection = nn.Sequential(
+            nn.Flatten(),
+            # nn.Linear(int(np.prod(self.output_size)), num_classes), # option: projection w/o ReLU
+            nn.Linear(int(np.prod(self.output_size)), 1024),
+            nn.ReLU(inplace=True),
+            nn.Linear(1024, num_classes),
+            #nn.Softmax(dim=1), # Add softmax activation
+        )
+
+        self.register_buffer('ts', torch.tensor([0., 1.]))
+        self.sigma = sigma
+        self.nfe = 0
+
+    def f(self, t, y: torch.Tensor):
+        input_y = y
+        self.nfe += 1
+        y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1) # params_size: 606408
+
+        fy = self.y_net(t, y.reshape((-1, *self.aug_input_size)), self.unravel_params(w.squeeze(0))).reshape(-1).unsqueeze(0)
+        nn = self.w_net(t, w)
+        fw = nn + w  # hardcoded OU prior on weights w
+        fl = (nn ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2)
+
+        assert input_y.shape == torch.cat([fy, fw, fl], dim=1).shape, f"Want: {input_y.shape} Got: {torch.cat((fy, fw, fl)).shape}. Check nblocks for dataset divisibility.\n"
+        return torch.cat([fy, fw, fl], dim=1)#.squeeze(0)
+
+    def g(self, t, y):
+        self.nfe += 1
+        gy = torch.zeros(size=(y.numel() - self.params_size - 1,), device=y.device)
+        gw = torch.full(size=(self.params_size,), fill_value=self.sigma, device=y.device)
+        gl = torch.tensor([0.], device=y.device)
+        
+        return torch.cat([gy, gw, gl], dim=0).unsqueeze(0)
+
+    def make_initial_params(self):
+        return self.y_net.make_initial_params()
+
+    def forward(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="euler", rtol=1e-4, atol=1e-3): # method="midpoint"
+        # Note: This works correctly, as long as we are requesting the nfe after each gradient update.
+        #  There are obviously cleaner ways to achieve this.
+        self.nfe = 0    
+        sdeint = torchsde.sdeint_adjoint if adjoint else torchsde.sdeint
+        
+        if self.aug_zeros.numel() > 0:  # Add zero channels.
+            aug_zeros = self.aug_zeros.expand(y.shape[0], *self.aug_zeros_size)
+            y = torch.cat([y, aug_zeros], dim=1) # 235200
+        aug_y = torch.cat((y.reshape(-1), self.flat_initial_params, torch.tensor([0.], device=y.device))) # 841609: (235200, 606408, 1)
+        aug_y = aug_y[None]
+        
+        bm = torchsde.BrownianInterval(
+            t0=self.ts[0], t1=self.ts[-1], size=aug_y.shape, dtype=aug_y.dtype, device=aug_y.device,
+            cache_size=45 if adjoint else 30  # If not adjoint, don't really need to cache.
+        )
+        
+        if adjoint_adaptive:
+            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
+        else:
+            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
+        
+        
+        y1 = aug_y1[:,:y.numel()].reshape(y.size())
+        logits = self.projection(y1)
+
+        logqp = .5 * aug_y1[:, -1]
+        
+        return logits, logqp
+
+    def zero_grad(self) -> None:
+        for p in self.parameters(): p.grad = None
+
+
+
+# TODO: add STL
+#class SDENet(torchsde.SDEStratonovich):
+class SDENet3(torchsde.SDEIto):
+    def __init__(self,
+                 input_size=(3, 32, 32),
+                 blocks=(2, 2, 2),
+                 weight_network_sizes=(1, 64, 1),
+                 num_classes=10,
+                 activation="softplus",
+                 verbose=False,
+                 inhomogeneous=True,
+                 sigma=0.1,
+                 hidden_width=128,
+                 aug_dim=0,
+                 mode=0):
+        super(SDENet, self).__init__(noise_type="diagonal")
+        self.input_size = input_size
+        self.aug_input_size = (aug_dim + input_size[0], *input_size[1:])
+        self.aug_zeros_size = (aug_dim, *input_size[1:])
+        self.register_buffer('aug_zeros', torch.zeros(size=(1, *self.aug_zeros_size)))
+
+        # Create network evolving state.
+        self.y_net, self.output_size = make_y_net(
+            input_size=input_size,
+            blocks=blocks,
+            activation=activation,
+            verbose=verbose,
+            hidden_width=hidden_width,
+            aug_dim=aug_dim,
+            mode=mode,
+        )
+        # Create network evolving weights.
+        initial_params = self.y_net.make_initial_params()  # w0.
+        flat_initial_params, unravel_params = utils.ravel_pytree(initial_params)
+        self.flat_initial_params = nn.Parameter(flat_initial_params, requires_grad=True)
+        self.params_size = flat_initial_params.numel()
+        print(f"initial_params ({self.params_size}): {flat_initial_params.shape}")
+        self.unravel_params = unravel_params
+        self.w_net = make_w_net(
+            in_features=self.params_size,
+            hidden_sizes=weight_network_sizes,
+            activation="tanh",
+            inhomogeneous=inhomogeneous
+        )
+
+        # Final projection layer.
+        self.projection = nn.Sequential(
+            nn.Flatten(),
+            # nn.Linear(int(np.prod(self.output_size)), num_classes), # option: projection w/o ReLU
+            nn.Linear(int(np.prod(self.output_size)), 1024),
+            nn.ReLU(inplace=True),
+            nn.Linear(1024, num_classes),
+            #nn.Softmax(dim=1), # Add softmax activation
+        )
+
+        self.register_buffer('ts', torch.tensor([0., 1.]))
+        self.sigma = sigma
+        self.nfe = 0
+
+    def f(self, t, y: torch.Tensor):
+        input_y = y
+        self.nfe += 1
+        y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1) # params_size: 606408
+
+        fy = self.y_net(t, y.reshape((-1, *self.aug_input_size)), self.unravel_params(w.squeeze(0))).reshape(-1).unsqueeze(0)
+        nn = self.w_net(t, w)
+        fw = nn + w  # hardcoded OU prior on weights w
+        fl = (nn ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2)
+
+        assert input_y.shape == torch.cat([fy, fw, fl], dim=1).shape, f"Want: {input_y.shape} Got: {torch.cat((fy, fw, fl)).shape}. Check nblocks for dataset divisibility.\n"
+        return torch.cat([fy, fw, fl], dim=1)#.squeeze(0)
+
+    def g(self, t, y):
+        self.nfe += 1
+        gy = torch.zeros(size=(y.numel() - self.params_size - 1,), device=y.device)
+        gw = torch.full(size=(self.params_size,), fill_value=self.sigma, device=y.device)
+        gl = torch.tensor([0.], device=y.device)
+        
+        return torch.cat([gy, gw, gl], dim=0).unsqueeze(0)
+
+    def make_initial_params(self):
+        return self.y_net.make_initial_params()
+
+    def forward(self, y, adjoint=False, dt=0.02, adaptive=False, adjoint_adaptive=False, method="euler", rtol=1e-4, atol=1e-3): # method="midpoint"
+        # Note: This works correctly, as long as we are requesting the nfe after each gradient update.
+        #  There are obviously cleaner ways to achieve this.
+        self.nfe = 0    
+        sdeint = torchsde.sdeint_adjoint if adjoint else torchsde.sdeint
+        
+        if self.aug_zeros.numel() > 0:  # Add zero channels.
+            aug_zeros = self.aug_zeros.expand(y.shape[0], *self.aug_zeros_size)
+            y = torch.cat([y, aug_zeros], dim=1) # 235200
+        aug_y = torch.cat((y.reshape(-1), self.flat_initial_params, torch.tensor([0.], device=y.device))) # 841609: (235200, 606408, 1)
+        aug_y = aug_y[None]
+        
+        bm = torchsde.BrownianInterval(
+            t0=self.ts[0], t1=self.ts[-1], size=aug_y.shape, dtype=aug_y.dtype, device=aug_y.device,
+            cache_size=45 if adjoint else 30  # If not adjoint, don't really need to cache.
+        )
+        
+        if adjoint_adaptive:
+            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, adjoint_adaptive=adjoint_adaptive, rtol=rtol, atol=atol)
+        else:
+            _, aug_y1 = sdeint(self, aug_y, self.ts, bm=bm, method=method, dt=dt, adaptive=adaptive, rtol=rtol, atol=atol)
+        
+        
+        y1 = aug_y1[:,:y.numel()].reshape(y.size())
+        logits = self.projection(y1)
+
+        logqp = .5 * aug_y1[:, -1]
+        
+        return logits, logqp
+
+    def zero_grad(self) -> None:
+        for p in self.parameters(): p.grad = None
+
+
+
+
 if __name__ == "__main__":
     batch_size = 2
     input_size = c, h, w = 3, 32, 32
