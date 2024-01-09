@@ -615,9 +615,9 @@ class SDENet3(torchsde.SDEIto):
         y, w, _ = y.split(split_size=(y.numel() - self.params_size - 1, self.params_size, 1), dim=1) # params_size: 606408
 
         fy = self.y_net(t, y.reshape((-1, *self.aug_input_size)), self.unravel_params(w.squeeze(0))).reshape(-1).unsqueeze(0)
-        nn = self.w_net(t, w)
-        fw = nn + w  # hardcoded OU prior on weights w
-        fl = (nn ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2)
+        fw = self.w_net(t, w)
+          # hardcoded OU prior on weights w
+        fl = ((fw + w) ** 2).sum(dim=1, keepdim=True) / (self.sigma ** 2)
 
         assert input_y.shape == torch.cat([fy, fw, fl], dim=1).shape, f"Want: {input_y.shape} Got: {torch.cat((fy, fw, fl)).shape}. Check nblocks for dataset divisibility.\n"
         return torch.cat([fy, fw, fl], dim=1)#.squeeze(0)
