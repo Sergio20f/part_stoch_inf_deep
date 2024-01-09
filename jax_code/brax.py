@@ -55,8 +55,6 @@ def PSDEBNN(fx_block_type,
 
         # Creates the unflatten_w function.
         rng = jax.random.PRNGKey(0)  # temp; not used.
-        print("rng", rng)
-        print("input_shape", input_shape)
         x_shape, tmp_w = fx.init(rng, input_shape)
         assert input_shape == x_shape, f"fx needs to have the same input and output shapes but got {input_shape} and {x_shape}"
         flat_w, unflatten_w = ravel_pytree(tmp_w)
@@ -284,8 +282,6 @@ def SDEBNN(fx_block_type,
 
         # Creates the unflatten_w function.
         rng = jax.random.PRNGKey(0)  # temp; not used.
-        print("rng", rng)
-        print("input_shape", input_shape)
         x_shape, tmp_w = fx.init(rng, input_shape)
         assert input_shape == x_shape, f"fx needs to have the same input and output shapes but got {input_shape} and {x_shape}"
         flat_w, unflatten_w = ravel_pytree(tmp_w)
