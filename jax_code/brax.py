@@ -43,11 +43,13 @@ def PSDEBNN(fx_block_type,
             method_ode="euler"):
     
     if ode_first: 
-        ts_ode = jnp.linspace(0.0, 1-timecut, nsteps)
-        ts_sde = jnp.linspace(1-timecut, 1, nsteps)
+        s = int(nsteps*(1-timecut))
+        ts_ode = jnp.linspace(0.0, 1-timecut, s+1)
+        ts_sde = jnp.linspace(1-timecut, 1, nsteps-s+1)
     else:
-        ts_ode = jnp.linspace(timecut, 1.0, nsteps)
-        ts_sde = jnp.linspace(0, timecut, nsteps)
+        s = int(nsteps*timecut)
+        ts_ode = jnp.linspace(timecut, 1.0, nsteps-s+1)
+        ts_sde = jnp.linspace(0, timecut, s+1)
     
     def make_layer(input_shape):
 
