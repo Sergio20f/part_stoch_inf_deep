@@ -67,7 +67,7 @@ def accuracy(params, data, nsamples, rng):
     predicted_class = jnp.argmax(avg_preds, axis=1)
     n_correct = jnp.sum(predicted_class == target_class)
     n_total = inputs.shape[0]
-    wts = info_dic['sdebnn_w']
+    wts = info_dic['psdebnn_w'] # info_dic['sdebnn_w']
     wts = jnp.stack(wts, axis=0)
     avg_wts = wts.mean(0)
     return n_correct, n_total, avg_preds, avg_wts
@@ -108,9 +108,9 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SDE-BNN CIFAR10 Training")
+    parser = argparse.ArgumentParser(description="PSDE-BNN CIFAR10 Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
-    parser.add_argument("--output", type=str, default="./output", help="(default: %(default)s)")
+    parser.add_argument("--output", type=str, default="output-psde-odefirst", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     parser.add_argument("--w_init", type=float, default=-1., help="scale the last layer W init of w_net. default: $(default)")
     parser.add_argument("--b_init", type=float, default=-1., help="scale the last layer b init of w_net. default: $(default)")
     parser.add_argument("--p_init", type=float, default=-1., help="scale the output of w_net by exp(p) so that diffusion doesn't overpower. default: $(default)")
-    parser.add_argument('--pause-every', type=int, default=5) # 200
+    parser.add_argument('--pause-every', type=int, default=200) # 200
 
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
@@ -140,8 +140,11 @@ if __name__ == "__main__":
     parser.add_argument("--disable_test", action="store_true")
     parser.add_argument("--verbose", default=True, action="store_true")
 
+    parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
+    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
+    parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
-    parser.add_argument("--nsteps", type=int, default=20, help="(default: %(default)s)")
+    parser.add_argument("--nsteps", type=int, default=40, help="(default: %(default)s)") # 20
     parser.add_argument("--block_type", type=int, choices=[0, 1, 2], default=0, help="(default: %(default)s)")
     parser.add_argument("--fx_dim", type=int, default=64, help="(default: %(default)s)")
     parser.add_argument("--fx_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
@@ -174,7 +177,7 @@ if __name__ == "__main__":
         init_random_params, _predict = brax.bnn_serial(mf(resnet))
     
     elif args.model == "sdenet":
-        # SDE BNN.
+        # SDEBNN.
         fw_dims = list(map(int, args.fw_dims.split("-")))
 
         layers = [mf(arch.Augment(args.aug))]
@@ -217,7 +220,7 @@ if __name__ == "__main__":
         init_random_params, _predict = brax.bnn_serial(*layers)
 
     else:
-        # SDE BNN.
+        # PSDEBNN
         fw_dims = list(map(int, args.fw_dims.split("-")))
 
         layers = [mf(arch.Augment(args.aug))]
@@ -237,7 +240,10 @@ if __name__ == "__main__":
                                                 w_drift=not args.no_drift,
                                                 stax_api=True,
                                                 infer_initial_state=args.infer_w0,
-                                                initial_state_prior_std=args.w0_prior_std)) for _ in range(nb)
+                                                initial_state_prior_std=args.w0_prior_std,
+                                                ode_first=args.ode_first,
+                                                timecut=args.timecut,
+                                                method_ode=args.method_ode)) for _ in range(nb)
                 ])
             else:
                 layers.extend([brax.PSDEBNN(args.block_type,
@@ -251,7 +257,10 @@ if __name__ == "__main__":
                                             remat=args.remat,
                                             w_drift=not args.no_drift,
                                             infer_initial_state=args.infer_w0,
-                                            initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
+                                            initial_state_prior_std=args.w0_prior_std,
+                                            ode_first=args.ode_first,
+                                            timecut=args.timecut,
+                                            method_ode=args.method_ode) for _ in range(nb)
                 ])
             if i < len(nblocks) - 1:
                 layers.append(mf(arch.SqueezeDownsample(2)))
@@ -321,6 +330,7 @@ if __name__ == "__main__":
     flat_params, unravel_params = ravel_pytree(get_params(opt_state))  # for pickling params
     
     print("\nStarting training...", flush=True)
+    start_training_time = time.time()
     for epoch in range(start_epoch, args.epochs):
         itr = itercount.__reduce__()[1][0]
         print(f"Epoch {epoch} | Iteration: {itr}")
@@ -450,5 +460,6 @@ if __name__ == "__main__":
                     f"Train ECE {cal_train['ece']} | Val ECE {cal_val['ece']} | Test ECE {cal_test['ece']}\n")
         logging.warning(f"Wrote epoch info to {os.path.join(output_dir, 'results.txt')}")
 
-    print(f"Finished successfully {args.epochs} epochs :)")
+    training_time = time.time() - start_training_time
+    print(f"Finished successfully {args.epochs} epochs in {training_time:.2f} seconds")
     tb_writer.close()

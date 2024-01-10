@@ -40,7 +40,7 @@ def PSDEBNN(fx_block_type,
             initial_state_prior_std=0.1, 
             ode_first=False,
             timecut=0.1,
-            method_ode="euler"):
+            method_ode="euler"): # try midpoint
     
     if ode_first: 
         s = int(nsteps*(1-timecut))
@@ -152,7 +152,7 @@ def PSDEBNN(fx_block_type,
 
         def _apply_fun_sde_first(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
 
-            init_w0, logstd_w0, fw_params = params
+            init_w0, logstd_w0, fw_params = params # should add , init_w1
             x = inputs
             if infer_initial_state:
                 raise ValueError("infer_initial_state not implemented for PSDEBNN - Ask Francesco")
@@ -179,8 +179,9 @@ def PSDEBNN(fx_block_type,
             ys2 = ys[-1]  # Take last time value.
             kl = kl + jnp.sum(ys2[x_dim + w_dim:])
 
+            # y1 = jnp.concatenate([ys2[:x_dim].reshape(-1), init_w1.reshape(-1), jnp.zeros(init_w1.shape).reshape(-1)])
             ys3 = ys2[:(x_dim+w_dim)]
-            ys4 = odeint(f_aug_ode, ys3, ts_ode, args=(fw_params,), method=method_ode)
+            ys4 = odeint(f_aug_ode, ys3, ts_ode, args=(fw_params,), method=method_ode) # should be y1 input
 
             y = ys4[-1]  # Take last time value.
             x = y[:x_dim].reshape(x_shape)
@@ -213,7 +214,7 @@ def PSDEBNN(fx_block_type,
 
             y0 = jnp.concatenate([x.reshape(-1), init_w0.reshape(-1)])
 
-            y_ode = odeint(f_aug_ode, y0, ts_ode, args=(fw_params,), method="euler")
+            y_ode = odeint(f_aug_ode, y0, ts_ode, args=(fw_params,), method=method_ode)
 
             y0_sde = jnp.concatenate([y_ode[-1].reshape(-1), jnp.zeros(init_w0.shape).reshape(-1)])
 
@@ -238,9 +239,7 @@ def PSDEBNN(fx_block_type,
                 infodict = {name + "_w": ys[:, x_dim:x_dim + w_dim].reshape(-1, *w_shape)}
                 return x, kl, infodict
 
-            return x, kl
-
-        
+            return x, kl        
 
         def apply_fun(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
             
