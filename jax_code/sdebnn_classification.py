@@ -111,7 +111,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PSDE-BNN CIFAR10 Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
     parser.add_argument("--output", type=str, default="output-psde-odefirst", help="(default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
     parser.add_argument("--epochs", type=int, default=300, help="(default: %(default)s)")
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
     parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)")
-    parser.add_argument("--diff_coef", type=float, default=1e-4, help="(default: %(default)s)")
+    parser.add_argument("--diff_coef", type=float, default=0.1, help="(default: %(default)s)") # CHANGE 0.1
     parser.add_argument("--ds", type=str, choices=["mnist", "cifar10"], default="cifar10", help="(default: %(default)s)")
     parser.add_argument("--no_xt", action="store_false", help="time dependent")
     parser.add_argument("--acc_grad", type=int, default=1)
@@ -406,14 +406,15 @@ if __name__ == "__main__":
         epoch_time = time.time() - start_time
         epoch_info = sep_loss(get_params(opt_state), (inputs, targets), rng_generator.next(), args.kl_coef / train_size)[-1]
         # check nan
-        no_nans = utils.check_nans([epoch_info['loss'], epoch_info['nll']])
-        if not no_nans:
-            with open(os.path.join(str(output_dir), f"{epoch}_nan.pkl"), 'wb') as f:
-                pickle.dump(get_params(opt_state), f)
-                exit(f"nan encountered in epoch_info and params pickled: {epoch_info}")
+        #no_nans = utils.check_nans([epoch_info['loss'], epoch_info['nll']])
+        #if not no_nans:
+        #    with open(os.path.join(str(output_dir), f"{epoch}_nan.pkl"), 'wb') as f:
+        #        pickle.dump(get_params(opt_state), f)
+        #        exit(f"nan encountered in epoch_info and params pickled: {epoch_info}")
 
         params = get_params(opt_state)
         train_acc, train_logits, train_labels, train_nll, train_kl, _ = evaluate(params, train_eval_loader, input_size, args.nsamples, rng_generator, args.kl_coef / train_size)
+        print("Train KL", train_kl)
         train_loss = train_nll + args.kl_coef * train_kl
         if args.disable_test:
             val_acc, val_logits, val_labels, val_nll, val_kl = jnp.zeros(1), jnp.zeros_like(train_logits), jnp.zeros(1), jnp.zeros(1)
