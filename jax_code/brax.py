@@ -78,7 +78,6 @@ def PSDEBNN(fx_block_type,
 
             # Compute next activations
             dx = fx.apply(unflatten_w(flat_w), (x, t))[0] if xt else fx.apply(unflatten_w(flat_w), x)
-            jax.debug.print("dx NaN: {}", jnp.any(jnp.isnan(dx)))
 
             # wtf is w_drift = False
             # wtf is xt = True
@@ -87,13 +86,11 @@ def PSDEBNN(fx_block_type,
             if w_drift:
                 fw_params = args
                 dw = fw.apply(fw_params, (flat_w, t))[0] if xt else fw.apply(fw_params, flat_w)
-                jax.debug.print("dw is NaN: {}", jnp.any(jnp.isnan(dw)))
             else:
                 dw = jnp.zeros(w_shape)
 
             # Hardcoded OU Process.
             u = (dw - (-flat_w)) / diff_coef if diff_coef != 0 else jnp.zeros(w_shape)
-            #u = jnp.zeros(w_shape)
 
             dkl = u**2
 
@@ -203,7 +200,7 @@ def PSDEBNN(fx_block_type,
         def _apply_fun_ode_first(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
             
             init_w0, logstd_w0, fw_params = params
-            #jax.debug.print("fw_params 1: {}", ravel_pytree(fw_params)[0])
+
             x = inputs
             if infer_initial_state:
                 raise ValueError("infer_initial_state not implemented for PSDEBNN - Ask Francesco")
@@ -220,22 +217,16 @@ def PSDEBNN(fx_block_type,
             y0 = jnp.concatenate([x.reshape(-1), init_w0.reshape(-1)])
 
             y_ode = odeint(f_aug_ode, y0, ts_ode, args=(fw_params,), method=method_ode)
-            #jax.debug.print("y_ode NaN: {}", jnp.any(jnp.isnan(y_ode[-1])))
-            #jax.debug.print("y_ode: {}", y_ode[-1])
 
             y0_sde = jnp.concatenate([y_ode[-1].reshape(-1), jnp.zeros(init_w0.shape).reshape(-1)])
-            #jax.debug.print("y0_sde 1: {}", y0_sde[:x_dim])
-            #jax.debug.print("y0_sde 2: {}", y0_sde[x_dim:x_dim+w_dim])
-            #jax.debug.print("y0_sde NaN: {}", jnp.any(jnp.isnan(y0_sde)))
 
             rep = w_dim if stl else 0  # STL NOT IMPLEMENTED
             
             if fixed_grid:
-                #jax.debug.print("fw_params 2: {}", ravel_pytree(fw_params)[0])
                 ys = sdeint_ito_fixed_grid(f_aug_sde, g_aug_sde, y0_sde, [0, ts_sde[-1]], rng, fw_params, method="euler_maruyama", rep=rep)
-                jax.debug.print("ys - x: {}", ys[-1][:x_dim])
-                jax.debug.print("ys - weights: {}", ys[-1][x_dim:x_dim+w_dim])
-                jax.debug.print("ys - kl: {}", ys[-1][x_dim+w_dim:])
+                #jax.debug.print("ys - x: {}", ys[-1][:x_dim])
+                #jax.debug.print("ys - weights: {}", ys[-1][x_dim:x_dim+w_dim])
+                #jax.debug.print("ys - kl: {}", ys[-1][x_dim+w_dim:])
             
             else:
                 print("using stochastic adjoint")
