@@ -110,7 +110,7 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PSDE-BNN CIFAR10 Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
-    parser.add_argument("--output", type=str, default="output-psde-odefirst", help="(default: %(default)s)")
+    parser.add_argument("--output", type=str, default="output-psde-odefirst-08", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
@@ -141,9 +141,9 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", default=True, action="store_true")
 
     parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
+    parser.add_argument('--timecut', type=float, default=0.8) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
-    parser.add_argument('--fix_w1', type=bool, default=True) # Fix w1 in PSDEBNN
+    parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
     parser.add_argument("--nsteps", type=int, default=30, help="(default: %(default)s)") # 20, Let's use 30 for now, 40 possible
     parser.add_argument("--block_type", type=int, choices=[0, 1, 2], default=0, help="(default: %(default)s)")
@@ -198,8 +198,7 @@ if __name__ == "__main__":
                                               w_drift=not args.no_drift,
                                               stax_api=True,
                                               infer_initial_state=args.infer_w0,
-                                              initial_state_prior_std=args.w0_prior_std,
-                                              fix_w1=args.fix_w1)) for _ in range(nb)
+                                              initial_state_prior_std=args.w0_prior_std)) for _ in range(nb)
                 ])
             else:
                 layers.extend([brax.SDEBNN(args.block_type,
@@ -213,8 +212,7 @@ if __name__ == "__main__":
                                            remat=args.remat,
                                            w_drift=not args.no_drift,
                                            infer_initial_state=args.infer_w0,
-                                           initial_state_prior_std=args.w0_prior_std,
-                                           fix_w1=args.fix_w1) for _ in range(nb)
+                                           initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
                 ])
             if i < len(nblocks) - 1:
                 layers.append(mf(arch.SqueezeDownsample(2)))
@@ -246,7 +244,8 @@ if __name__ == "__main__":
                                                 initial_state_prior_std=args.w0_prior_std,
                                                 ode_first=args.ode_first,
                                                 timecut=args.timecut,
-                                                method_ode=args.method_ode)) for _ in range(nb)
+                                                method_ode=args.method_ode,
+                                                fix_w1=args.fix_w1)) for _ in range(nb)
                 ])
             else:
                 layers.extend([brax.PSDEBNN(args.block_type,
@@ -263,7 +262,8 @@ if __name__ == "__main__":
                                             initial_state_prior_std=args.w0_prior_std,
                                             ode_first=args.ode_first,
                                             timecut=args.timecut,
-                                            method_ode=args.method_ode) for _ in range(nb)
+                                            method_ode=args.method_ode,
+                                            fix_w1=args.fix_w1) for _ in range(nb)
                 ])
             if i < len(nblocks) - 1:
                 layers.append(mf(arch.SqueezeDownsample(2)))
