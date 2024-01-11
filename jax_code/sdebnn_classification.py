@@ -67,7 +67,7 @@ def accuracy(params, data, nsamples, rng):
     predicted_class = jnp.argmax(avg_preds, axis=1)
     n_correct = jnp.sum(predicted_class == target_class)
     n_total = inputs.shape[0]
-    wts = info_dic['psdebnn_w'] # info_dic['sdebnn_w']
+    wts = info_dic['psdebnn_w'] # info_dic['sdebnn_w'] HAVE TO MANUALLY CHANGE THIS
     wts = jnp.stack(wts, axis=0)
     avg_wts = wts.mean(0)
     return n_correct, n_total, avg_preds, avg_wts
@@ -110,7 +110,7 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PSDE-BNN CIFAR10 Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
-    parser.add_argument("--output", type=str, default="output-psde-odefirst-05", help="(default: %(default)s)")
+    parser.add_argument("--output", type=str, default="output-psde-odefirst", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", default=True, action="store_true")
 
     parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.5) # Time step that divides SDE from ODE
+    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
     parser.add_argument('--fix_w1', type=bool, default=True) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
@@ -384,22 +384,6 @@ if __name__ == "__main__":
                 tb_writer.add_scalar('Validation/NLL_EMA', np_val_nll_ema, epoch)
                 tb_writer.add_scalar('Validation/KL_EMA', np_val_kl_ema, epoch)
 
-                # Update best validation accuracy and save checkpoint if needed
-                if val_accuracy > best_val_acc:
-                    best_val_acc = val_accuracy
-                    # Prepare checkpoint state
-                    checkpoint_state = {
-                        'epoch': epoch,
-                        'global_step': global_step,
-                        'model_state': get_params(opt_state),
-                        'ema_state': ema_params,
-                        'optimizer_state': opt_state,
-                        'best_val_acc': best_val_acc,
-                    }
-                    # Save checkpoint
-                    utils.save_params(checkpoint_state, os.path.join(output_dir, f"best_model_checkpoint.pkl"), pkl=True)
-                    logging.info(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')}")
-
                 logging.info(
                     f"Global step: {global_step}, Epoch: {epoch}, "
                     f"Validation Accuracy: {val_accuracy:.4f}, "
@@ -452,6 +436,19 @@ if __name__ == "__main__":
         if best_val_acc < val_acc:
             best_val_acc = val_acc
             print("Best Val Acc", best_val_acc)
+            # Prepare checkpoint state
+            checkpoint_state = {
+                'epoch': epoch,
+                'global_step': global_step,
+                'model_state': get_params(opt_state),
+                'ema_state': ema_params,
+                'optimizer_state': opt_state,
+                'best_val_acc': best_val_acc,
+            }
+            # Save checkpoint
+            utils.save_params(checkpoint_state, os.path.join(output_dir, f"best_model_checkpoint.pkl"), pkl=True)
+            print(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')} at epoch {epoch}")
+            logging.info(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')} at epoch {epoch}")
 
         if best_test_acc < test_acc:
             best_test_acc = test_acc
