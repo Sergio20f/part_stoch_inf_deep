@@ -9,6 +9,7 @@ from jax.flatten_util import ravel_pytree
 from jax.lax import stop_gradient
 from sdeint import sdeint_ito, sdeint_ito_fixed_grid
 from odeint import odeint
+import copy
 
 from arch import Layer, build_fx
 
@@ -40,7 +41,8 @@ def PSDEBNN(fx_block_type,
             initial_state_prior_std=0.1, 
             ode_first=False,
             timecut=0.1,
-            method_ode="euler"):
+            method_ode="euler", 
+            fix_w1=False):
     
     if ode_first: 
         s = int(nsteps*(1-timecut))
@@ -147,12 +149,20 @@ def PSDEBNN(fx_block_type,
             else:
                 fw_params = ()
 
-            return input_shape, (init_w0, logstd_w0, fw_params)
+            if not fix_w1:
+                return input_shape, (init_w0, logstd_w0, fw_params)
+            else:
+                init_w1 = copy.deepcopy(init_w0)
+                return input_shape, (init_w0, init_w1, logstd_w0, fw_params)
         
 
         def _apply_fun_sde_first(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
+            
+            if not fix_w1:
+                init_w0, logstd_w0, fw_params = params
+            else:
+                init_w0, init_w1, logstd_w0, fw_params = params
 
-            init_w0, logstd_w0, fw_params = params
             x = inputs
             if infer_initial_state:
                 raise ValueError("infer_initial_state not implemented for PSDEBNN - Ask Francesco")
@@ -179,7 +189,11 @@ def PSDEBNN(fx_block_type,
             ys2 = ys[-1]  # Take last time value.
             kl = kl + jnp.sum(ys2[x_dim + w_dim:])
 
-            ys3 = ys2[:(x_dim+w_dim)]
+            if not fix_w1:
+                ys3 = ys2[:(x_dim+w_dim)]
+            else:
+                ys3 = jnp.concatenate([ys2[:x_dim].reshape(-1), init_w1.reshape(-1)])
+
             ys4 = odeint(f_aug_ode, ys3, ts_ode, args=(fw_params,), method=method_ode)
 
             y = ys4[-1]  # Take last time value.
@@ -239,8 +253,6 @@ def PSDEBNN(fx_block_type,
                 return x, kl, infodict
 
             return x, kl
-
-        
 
         def apply_fun(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
             
@@ -384,7 +396,6 @@ def SDEBNN(fx_block_type,
         return init_fun, apply_fun
 
     return Layer(*stax.shape_dependent(make_layer))
-
 
 def MeanField(layer, prior_std=0.1, disable=False):
 
