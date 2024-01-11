@@ -4,6 +4,7 @@ nohup*
 toy_results*
 sdebnn_classification2.py
 sdebnn_classification3.py
+sdebnn_classification4.py
 jax_code/data/
 jax_code/output*
 jax_code/__pycache__/

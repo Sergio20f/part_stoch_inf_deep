@@ -299,7 +299,7 @@ if __name__ == "__main__":
     parser.add_argument('--eval-batches', type=int, default=10000)
 
     # Model.
-    parser.add_argument('--dt', type=float, default=0.1)
+    parser.add_argument('--dt', type=float, default=0.1) # change to 0.05
     parser.add_argument('--rtol', type=float, default=1e-5)
     parser.add_argument('--atol', type=float, default=1e-4)
     parser.add_argument('--steps', type=int, default=20)
