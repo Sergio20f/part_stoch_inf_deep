@@ -9,3 +9,4 @@ jax_code/data/
 jax_code/output*
 jax_code/__pycache__/
 jax_code/nohup*
+output*
