@@ -239,15 +239,33 @@ def PSDEBNN(fx_block_type,
 
             rep = w_dim if stl else 0  # STL NOT IMPLEMENTED
             
-            if fixed_grid:
-                ys = sdeint_ito_fixed_grid(f_aug_sde, g_aug_sde, y0_sde, jnp.linspace(0, timecut, nsteps-s+1), rng, fw_params, method="euler_maruyama", rep=rep)
-                #jax.debug.print("ys - x: {}", ys[-1][:x_dim])
-                #jax.debug.print("ys - weights: {}", ys[-1][x_dim:x_dim+w_dim])
-                #jax.debug.print("ys - kl: {}", ys[-1][x_dim+w_dim:])
-            
+            if timecut > 0.0:
+                if fixed_grid:
+                    ys = sdeint_ito_fixed_grid(f_aug_sde, g_aug_sde, y0_sde, jnp.linspace(0, timecut, nsteps-s+1), rng, fw_params, method="euler_maruyama", rep=rep)
+                    #jax.debug.print("ys - x: {}", ys[-1][:x_dim])
+                    #jax.debug.print("ys - weights: {}", ys[-1][x_dim:x_dim+w_dim])
+                    #jax.debug.print("ys - kl: {}", ys[-1][x_dim+w_dim:])
+                
+                else:
+                    print("using stochastic adjoint")
+                    ys = sdeint_ito(f_aug_sde, g_aug_sde, y0_sde, ts_sde, rng, fw_params, method="euler_maruyama", rep=rep)
+            elif timecut == 0.0:
+                ys = y_ode
+                y = ys[-1]  # Take last time value.
+                x = y[:x_dim].reshape(x_shape)
+                kl = 0
+                
+                if stax_api:
+                    return x
+
+                if full_output:
+                    infodict = {name + "_w": ys[:, x_dim:x_dim + w_dim].reshape(-1, *w_shape)}
+                    return x, kl, infodict
+                
+                return x, kl
+                            
             else:
-                print("using stochastic adjoint")
-                ys = sdeint_ito(f_aug_sde, g_aug_sde, y0_sde, ts_sde, rng, fw_params, method="euler_maruyama", rep=rep)
+                raise ValueError("timecut must be >= 0.0")
 
             y = ys[-1]  # Take last time value.
             x = y[:x_dim].reshape(x_shape)
