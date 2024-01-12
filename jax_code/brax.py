@@ -52,6 +52,7 @@ def PSDEBNN(fx_block_type,
         s = int(nsteps*(1-timecut))
         ts_ode = jnp.linspace(0, 1-timecut, s+1)
         ts_sde = jnp.linspace(1-timecut, 1, nsteps-s+1)
+
     else:
         s = int(nsteps*timecut)
         ts_ode = jnp.linspace(timecut, 1.0, nsteps-s+1)
@@ -239,7 +240,7 @@ def PSDEBNN(fx_block_type,
             rep = w_dim if stl else 0  # STL NOT IMPLEMENTED
             
             if fixed_grid:
-                ys = sdeint_ito_fixed_grid(f_aug_sde, g_aug_sde, y0_sde, [0, ts_sde[-1]], rng, fw_params, method="euler_maruyama", rep=rep)
+                ys = sdeint_ito_fixed_grid(f_aug_sde, g_aug_sde, y0_sde, jnp.linspace(0, timecut, nsteps-s+1), rng, fw_params, method="euler_maruyama", rep=rep)
                 #jax.debug.print("ys - x: {}", ys[-1][:x_dim])
                 #jax.debug.print("ys - weights: {}", ys[-1][x_dim:x_dim+w_dim])
                 #jax.debug.print("ys - kl: {}", ys[-1][x_dim+w_dim:])
