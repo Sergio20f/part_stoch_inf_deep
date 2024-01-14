@@ -21,7 +21,7 @@ from registry import add_data
 from jax import vmap
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.datasets import CIFAR10, MNIST
+from torchvision.datasets import CIFAR10, MNIST, SVHN
 
 tf.config.experimental.set_visible_devices([], "GPU")
 
@@ -68,7 +68,35 @@ def get_dataset(batch_size, test_batch_size, dataset):
             transform=test_transform,
             download=True,
         )
-
+      
+    elif dataset == "svhn":
+      input_size = (32, 32, 3)
+      transform = transforms.Compose(
+          [
+              transforms.RandomCrop(32, padding=4),
+              transforms.RandomHorizontalFlip(),
+              transforms.ToTensor(),
+              transforms.Normalize((0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970))
+          ]
+      )
+      test_transform = transforms.Compose(
+          [
+              transforms.ToTensor(),
+              transforms.Normalize((0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970))
+          ]
+      )
+      train_set = SVHN(
+          f"{SCRIPT_DIR}/data/svhn",
+          split="train",
+          transform=transform,
+          download=True,
+      )
+      test_set = SVHN(
+          f"{SCRIPT_DIR}/data/svhn",
+          split="test",
+          transform=test_transform,
+          download=True,
+      )
 
     nval = int(len(train_set) * 0.1)
     train_set, val_set = torch.utils.data.random_split(train_set, [len(train_set) - nval, nval], generator=torch.Generator().manual_seed(42))
