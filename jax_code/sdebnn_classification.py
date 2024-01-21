@@ -110,8 +110,8 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PSDE-BNN CIFAR10 Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
-    parser.add_argument("--output", type=str, default="output-psde-odefirst-08", help="(default: %(default)s)")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output", type=str, default="output-psde-sdefirst-03", help="(default: %(default)s)")
+    parser.add_argument("--seed", type=int, default=42) # 0
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
     parser.add_argument("--epochs", type=int, default=100, help="(default: %(default)s)")
@@ -125,7 +125,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
-    parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)")
+    # for PSDEBNN makes sense to have kl_coef as a function of the timecut (1/(timecut))*10**-4
+    parser.add_argument("--kl_coef", type=float, default=(1/(0.3))*10**-4, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
     parser.add_argument("--diff_coef", type=float, default=0.1, help="(default: %(default)s)") # CHANGE 0.1
     parser.add_argument("--ds", type=str, choices=["mnist", "cifar10"], default="cifar10", help="(default: %(default)s)")
     parser.add_argument("--no_xt", action="store_false", help="time dependent")
@@ -136,14 +137,13 @@ if __name__ == "__main__":
     parser.add_argument("--meanfield_sdebnn", action="store_true")
     parser.add_argument("--infer_w0", action="store_true", help="don't learn w0 initial state, infer initial with Gaussian variational dist'n")
     parser.add_argument("--w0_prior_std", type=float, default=0.1, help="initial w0 state prior std")
-
     parser.add_argument("--disable_test", action="store_true")
     parser.add_argument("--verbose", default=True, action="store_true")
 
-    parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.8) # Time step that divides SDE from ODE
+    parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
+    parser.add_argument('--timecut', type=float, default=0.3) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
-    parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
+    parser.add_argument('--fix_w1', type=bool, default=True) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
     parser.add_argument("--nsteps", type=int, default=30, help="(default: %(default)s)") # 20, Let's use 30 for now, 40 possible
     parser.add_argument("--block_type", type=int, choices=[0, 1, 2], default=0, help="(default: %(default)s)")
