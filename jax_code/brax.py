@@ -327,6 +327,7 @@ def SDEBNN(fx_block_type,
         assert input_shape == x_shape, f"fx needs to have the same input and output shapes but got {input_shape} and {x_shape}"
         flat_w, unflatten_w = ravel_pytree(tmp_w)
         w_shape = flat_w.shape
+        #jax.debug.print("w_shape {}: ", w_shape)
         del tmp_w
 
         # x_dim definitely not be negative...
@@ -506,3 +507,150 @@ def bnn_serial(*layers):
         return inputs, total_kl, infodict
 
     return Layer(init_fun, apply_fun)
+
+# -------------------------------------------------------------------------------------------------
+
+def PSDEBNN_H(fx_block_type,
+           fx_dim,
+           fx_actfn,
+           fw1,
+           fw2,
+           ratio=0.5,
+           diff_coef=1e-4,
+           name="psdebnn_h",
+           stl=False,
+           xt=False,
+           nsteps=20,
+           remat=False,
+           w_drift=True,
+           stax_api=False,
+           infer_initial_state=False,
+           initial_state_prior_std=0.1):
+
+    # This controls the number of function evaluations and the step size.
+    ts = jnp.linspace(0.0, 1.0, nsteps)
+
+    def make_layer(input_shape):
+
+        fx = build_fx(fx_block_type, input_shape, fx_dim, fx_actfn)
+
+        # Creates the unflatten_w function.
+        rng = jax.random.PRNGKey(0)  # temp; not used.
+        x_shape, tmp_w = fx.init(rng, input_shape)
+        assert input_shape == x_shape, f"fx needs to have the same input and output shapes but got {input_shape} and {x_shape}"
+
+        # first w network
+        flat_w, unflatten_w = ravel_pytree(tmp_w)
+        w_shape = flat_w.shape
+
+        del tmp_w
+
+        # x_dim definitely not be negative...
+        x_dim = np.abs(np.prod(x_shape))
+        w_dim = np.abs(np.prod(w_shape))
+        w_dim1 = int(np.abs(np.prod(w_shape)) * ratio)
+        w_dim2 = int(w_dim - w_dim1)
+
+        w1_shape = (w_dim1,)
+        w2_shape = (w_dim2,)
+
+        def f_aug(y, t, args):
+
+            x = y[:x_dim].reshape(x_shape)
+
+            flat_w = y[x_dim:x_dim + w_dim].reshape(w_shape)
+
+            dx = fx.apply(unflatten_w(flat_w), (x, t))[0] if xt else fx.apply(unflatten_w(flat_w), x)
+            
+            if w_drift:
+                flat_w1 = flat_w[:w_dim1]
+                flat_w2 = flat_w[w_dim1:]
+                
+                fw1_params, fw2_params = args
+                dw1 = fw1.apply(fw1_params, (flat_w1, t))[0] if xt else fw1.apply(fw1_params, flat_w1)
+                dw2 = fw2.apply(fw2_params, (flat_w2, t))[0] if xt else fw2.apply(fw2_params, flat_w2)
+            else:
+                dw1 = jnp.zeros(w1_shape)
+                dw2 = jnp.zeros(w2_shape)
+
+            # Hardcoded OU Process.
+            u = (dw1 - (-flat_w1)) / diff_coef if diff_coef != 0 else jnp.zeros(w1_shape) # change here
+            dkl = u**2
+
+            dkl2 = jnp.zeros(w2_shape)
+
+            return jnp.concatenate([dx.reshape(-1), dw1.reshape(-1), dw2.reshape(-1), dkl.reshape(-1), dkl2.reshape(-1)])
+
+        def g_aug(y, t, args):
+            dx = jnp.zeros(x_shape)
+            diff_w1 = jnp.ones(w1_shape) * diff_coef
+            diff_w2 = jnp.zeros(w2_shape) 
+
+            dkl = jnp.zeros(w_shape)
+
+            return jnp.concatenate([dx.reshape(-1), diff_w1.reshape(-1), diff_w2.reshape(-1), dkl.reshape(-1)])
+
+        def init_fun(rng, input_shape):
+            
+            output_shape, w0 = fx.init(rng, input_shape)
+            init_w0, unflatten_w = ravel_pytree(w0)
+
+            if infer_initial_state:
+                logstd_w0 = tree_util.tree_map(lambda x: jnp.zeros_like(x) - 4.0, init_w0)
+            else:
+                logstd_w0 = ()
+
+            if w_drift:
+                output_shape1, fw_params1 = fw1.init(rng, w1_shape)
+                output_shape2, fw_params2 = fw2.init(rng, w2_shape)
+                assert w1_shape == output_shape1, "fw needs to have the same input and output shapes"
+                assert w2_shape == output_shape2, "fw needs to have the same input and output shapes"
+            else:
+                fw_params1 = ()
+                fw_params2 = ()
+
+            return input_shape, (init_w0, logstd_w0, fw_params1, fw_params2)
+
+        def apply_fun(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
+            
+            init_w0, logstd_w0, fw1_params, fw2_params = params
+            x = inputs
+            
+            if infer_initial_state:
+                w0_rng, rng = jax.random.split(rng)
+                mean_w0 = init_w0
+                init_w0 = jax.random.normal(w0_rng, mean_w0.shape) * jnp.exp(logstd_w0) + mean_w0
+                kl = normal_logprob(init_w0, mean_w0, logstd_w0) - \
+                    normal_logprob(init_w0, 0., jnp.log(initial_state_prior_std))
+                kl = jnp.sum(kl)
+            else:
+                kl = 0
+
+            y0 = jnp.concatenate([x.reshape(-1), init_w0.reshape(-1), jnp.zeros(init_w0.shape).reshape(-1)])
+            rep = w_dim if stl else 0  # STL
+            if fixed_grid:
+                ys = sdeint_ito_fixed_grid(f_aug, g_aug, y0, ts, rng, (fw1_params, fw2_params), method="euler_maruyama", rep=rep)
+            else:
+                print("using stochastic adjoint")
+                ys = sdeint_ito(f_aug, g_aug, y0, ts, rng, (fw1_params, fw2_params), method="euler_maruyama", rep=rep)
+            
+            y = ys[-1]  # Take last time value.
+            x = y[:x_dim].reshape(x_shape)
+            
+            kl = kl + jnp.sum(y[x_dim + w_dim:x_dim + w_dim + w_dim1])
+
+            # Hack to turn this into a stax.layer API when deterministic.
+            if stax_api:
+                return x
+
+            if full_output:
+                infodict = {name + "_w": ys[:, x_dim:x_dim + w_dim].reshape(-1, *w_shape)}
+                return x, kl, infodict
+
+            return x, kl
+
+        if remat:
+            apply_fun = jax.checkpoint(apply_fun, concrete=True)
+        return init_fun, apply_fun
+
+    return Layer(*stax.shape_dependent(make_layer))

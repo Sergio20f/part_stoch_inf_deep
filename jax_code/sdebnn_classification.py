@@ -67,7 +67,7 @@ def accuracy(params, data, nsamples, rng):
     predicted_class = jnp.argmax(avg_preds, axis=1)
     n_correct = jnp.sum(predicted_class == target_class)
     n_total = inputs.shape[0]
-    wts = info_dic['psdebnn_w'] # info_dic['sdebnn_w'] HAVE TO MANUALLY CHANGE THIS
+    wts = info_dic['psdebnn_h_w'] # info_dic['sdebnn_w'] HAVE TO MANUALLY CHANGE THIS
     wts = jnp.stack(wts, axis=0)
     avg_wts = wts.mean(0)
     return n_correct, n_total, avg_preds, avg_wts
@@ -108,9 +108,9 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PSDE-BNN CIFAR10 Training")
-    parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet"], default="psdenet")
-    parser.add_argument("--output", type=str, default="output-psde-sdefirst-03", help="(default: %(default)s)")
+    parser = argparse.ArgumentParser(description="PSDE-BNN-H CIFAR10 Training")
+    parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet", "psdenet_h"], default="psdenet_h")
+    parser.add_argument("--output", type=str, default="output-psde-horizontal-05", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42) # 0
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
@@ -126,7 +126,8 @@ if __name__ == "__main__":
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
     # for PSDEBNN makes sense to have kl_coef as a function of the timecut (1/(timecut))*10**-4
-    parser.add_argument("--kl_coef", type=float, default=(1/(0.3))*10**-4, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
+    #parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)")
+    parser.add_argument("--kl_coef", type=float, default=(1/(0.5))*10**-4, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
     parser.add_argument("--diff_coef", type=float, default=0.1, help="(default: %(default)s)") # CHANGE 0.1
     parser.add_argument("--ds", type=str, choices=["mnist", "cifar10"], default="cifar10", help="(default: %(default)s)")
     parser.add_argument("--no_xt", action="store_false", help="time dependent")
@@ -141,15 +142,15 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", default=True, action="store_true")
 
     parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.3) # Time step that divides SDE from ODE
+    parser.add_argument('--timecut', type=float, default=0.5) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
-    parser.add_argument('--fix_w1', type=bool, default=True) # Fix w1 in PSDEBNN
+    parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
     parser.add_argument("--nsteps", type=int, default=30, help="(default: %(default)s)") # 20, Let's use 30 for now, 40 possible
     parser.add_argument("--block_type", type=int, choices=[0, 1, 2], default=0, help="(default: %(default)s)")
     parser.add_argument("--fx_dim", type=int, default=64, help="(default: %(default)s)")
     parser.add_argument("--fx_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
-    parser.add_argument("--fw_dims", type=str, default="2-128-2", help="dash-separated integers (default: %(default)s)")
+    parser.add_argument("--fw_dims", type=str, default="1-64-1", help="dash-separated integers (default: %(default)s)") # 2-128-2 for PSDEBNN(v) and SDEBNN
     parser.add_argument("--fw_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
     parser.add_argument("--lr_sched", type=str, choices=['constant', 'custom', 'custom2', 'stair', 'exp', 'inv', 'cos', 'warmup'], default="constant", help="(default: %(default)s)")
     args = parser.parse_args()
@@ -220,7 +221,7 @@ if __name__ == "__main__":
 
         init_random_params, _predict = brax.bnn_serial(*layers)
 
-    else:
+    elif args.model == "psdenet":
         # PSDEBNN
         fw_dims = list(map(int, args.fw_dims.split("-")))
 
@@ -242,7 +243,6 @@ if __name__ == "__main__":
                                                 stax_api=True,
                                                 infer_initial_state=args.infer_w0,
                                                 initial_state_prior_std=args.w0_prior_std,
-                                                ode_first=args.ode_first,
                                                 timecut=args.timecut,
                                                 method_ode=args.method_ode,
                                                 fix_w1=args.fix_w1)) for _ in range(nb)
@@ -260,10 +260,57 @@ if __name__ == "__main__":
                                             w_drift=not args.no_drift,
                                             infer_initial_state=args.infer_w0,
                                             initial_state_prior_std=args.w0_prior_std,
-                                            ode_first=args.ode_first,
                                             timecut=args.timecut,
                                             method_ode=args.method_ode,
                                             fix_w1=args.fix_w1) for _ in range(nb)
+                ])
+            if i < len(nblocks) - 1:
+                layers.append(mf(arch.SqueezeDownsample(2)))
+        layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
+
+        init_random_params, _predict = brax.bnn_serial(*layers)
+    
+    else:
+        # PSDEBNN
+        fw_dims = list(map(int, args.fw_dims.split("-")))
+
+        layers = [mf(arch.Augment(args.aug))]
+        nblocks = list(map(int, args.nblocks.split("-")))
+        for i, nb in enumerate(nblocks):
+            fw_s = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Stochastic weights
+            fw_d = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Deterministic weights
+            if args.meanfield_sdebnn:
+                layers.extend([mf(brax.PSDEBNN_H(args.block_type,
+                                              args.fx_dim,
+                                              args.fx_actfn,
+                                              fw1=fw_s,
+                                              fw2=fw_d,
+                                              ratio=args.timecut,
+                                              diff_coef=args.diff_coef,
+                                              stl=args.stl,
+                                              xt=args.no_xt,
+                                              nsteps=args.nsteps,
+                                              remat=args.remat,
+                                              w_drift=not args.no_drift,
+                                              stax_api=True,
+                                              infer_initial_state=args.infer_w0,
+                                              initial_state_prior_std=args.w0_prior_std)) for _ in range(nb)
+                ])
+            else:
+                layers.extend([brax.PSDEBNN_H(args.block_type,
+                                           args.fx_dim,
+                                           args.fx_actfn,
+                                           fw1=fw_s,
+                                           fw2=fw_d,
+                                           ratio=args.timecut,
+                                           diff_coef=args.diff_coef,
+                                           stl=args.stl,
+                                           xt=args.no_xt,
+                                           nsteps=args.nsteps,
+                                           remat=args.remat,
+                                           w_drift=not args.no_drift,
+                                           infer_initial_state=args.infer_w0,
+                                           initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
                 ])
             if i < len(nblocks) - 1:
                 layers.append(mf(arch.SqueezeDownsample(2)))
