@@ -1,311 +1,336 @@
-"""Differential equation layers that support explicitly 
-passing parameters as tensors to `forward`.
+"""
+Implementations of different time-dependent ODE/SDE layers.
 """
 
-import abc
-import logging
-from typing import Any, List, Optional, Union
-
-import torch
-import torch.nn.functional as F
-from torch import nn
-from torch.nn.common_types import _size_2_t
-from torch.nn.modules.utils import _pair
-
-import utils
-
-_shape_t = Union[int, List[int], torch.Size]
-
-class Augment(nn.Module):
-    def __init__(self, aug_dim):
-        super(Augment, self).__init__()
-        self.aug_dim = aug_dim
-    
-    def forward(self, y, *args, **kwargs):
-        z = torch.zeros(y.shape[:-1] + (1 * self.aug_dim,))
-        aug_z = torch.cat((y, z), axis=1) # channel dim = 1
-        return aug_z
+import jax
+import jax.numpy as np
+from jax import random
+from jax.example_libraries import stax
+from jax.nn.initializers import glorot_normal, normal, he_normal
 
 
-class DiffEqModule(abc.ABC, nn.Module):
-    def make_initial_params(self):
-        return [p.detach().clone() for p in self.parameters()]
+def shape_dependent(make_layer):
+    """Replaces stax.shape_dependent for time dependent inputs
+    Args:
+      make_layer: a one-argument function that takes an input shape as an argument
+        (a tuple of positive integers) and returns an (init_fun, apply_fun) pair.
+    Returns:
+      A new layer, meaning an (init_fun, apply_fun) pair, representing the same
+      layer as returned by `make_layer` but with its construction delayed until
+      input shapes are known.
+    """
+    def init_fun(rng, input_shape):
+        return make_layer(input_shape)[0](rng, input_shape)
 
-    # Fixes stupid pylint bug due to 1.6.0:
-    # https://github.com/pytorch/pytorch/issues/42305
-    def _forward_unimplemented(self, *input: Any) -> None:
-        pass
+    def apply_fun(params, inputs, **kwargs):
+        # x = inputs
+        x, t = inputs
+        return make_layer(x.shape)[1](params, (x, t), **kwargs)
 
-
-class DiffEqSequential(DiffEqModule):
-    """Entry point for building drift on hidden state of neural network."""
-
-    def __init__(self, *layers: DiffEqModule, explicit_params=True):
-        # explicit_params: Register the built-in parameters if True; else use `params` argument of `forward`.
-        super(DiffEqSequential, self).__init__()
-        self.layers = layers if explicit_params else nn.ModuleList(layers)
-        self.explicit_params = explicit_params
-
-    def forward(self, t, y, params: Optional[List] = None):
-        if params is None:
-            for layer in self.layers:
-                y = layer(t, y)
-        else:
-            for layer, params_ in zip(self.layers, params):
-                y = layer(t, y, params_)
-        return y
-
-    def make_initial_params(self):
-        return [layer.make_initial_params() for layer in self.layers]
-
-    def __repr__(self):
-        return repr(nn.Sequential(*self.layers)) if self.explicit_params else repr(self.layers)
+    return init_fun, apply_fun
 
 
-class DiffEqWrapper(DiffEqModule):
-    def __init__(self, module):
-        super(DiffEqWrapper, self).__init__()
-        self.module = module
+def IgnoreLinear(out_dim, W_init=he_normal(), b_init=normal()):
+    """ y = Wx + b
+    """
+    def init_fun(rng, input_shape):
+        output_shape = input_shape[:-1] + (out_dim,)
+        k1, k2 = random.split(rng)
+        W, b = W_init(k1, (input_shape[-1], out_dim)), b_init(k2, (out_dim,))
+        return output_shape, (W, b)
 
-    def forward(self, t, y, *args, **kwargs):
-        del t, args, kwargs
-        return self.module(y)
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        W, b = params
+        return (np.dot(x, W) + b, t)
+    return init_fun, apply_fun
 
 
-class ConcatConv2d(nn.Conv2d, DiffEqModule):
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 kernel_size: _size_2_t,
-                 stride: _size_2_t = 1,
-                 padding: _size_2_t = 0,
-                 dilation: _size_2_t = 1,
-                 groups: int = 1,
-                 bias: bool = True,
-                 padding_mode: str = 'zeros'):
-        super(ConcatConv2d, self).__init__(
-            in_channels=in_channels + 1,  # Extra time channel!
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=bias,
-            padding_mode=padding_mode
+def ConcatLinear(out_dim, W_init=he_normal(), b_init=normal()):
+    """ y = Wx + b + at
+    """
+    def init_fun(rng, input_shape):
+        output_shape = input_shape[:-1] + (out_dim,)
+        k1, k2 = random.split(rng)
+        W, b = W_init(k1, (input_shape[-1] + 1,
+                           out_dim)), b_init(k2, (out_dim,))
+        return output_shape, (W, b)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        W, b = params
+
+        # concatenate t onto the inputs
+        tt = t.reshape([-1] * (x.ndim - 1) + [1])  # single batch example
+        # i.e. [:, :, ..., :, :1] column vector
+        tt = np.tile(tt, x.shape[:-1] + (1,))
+        xtt = np.concatenate([x, tt], axis=-1)
+
+        return (np.dot(xtt, W) + b, t)
+    return init_fun, apply_fun
+
+
+def ConcatSquashLinear(out_dim, W_init=he_normal(), b_init=normal()):
+    """ y = Sigmoid(at + c)(Wx + b) + dt. Note: he_normal only takes multi dim.
+    """
+    def init_fun(rng, input_shape):
+        output_shape = input_shape[:-1] + (out_dim,)
+        k1, k2, k3, k4, k5 = random.split(rng, 5)
+        W, b = W_init(k1, (input_shape[-1], out_dim)), b_init(k2, (out_dim,))
+        w_t, w_tb = b_init(k3, (out_dim,)), b_init(k4, (out_dim,))
+        b_t = b_init(k5, (out_dim,))
+        return output_shape, (W, b, w_t, w_tb, b_t)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        W, b, w_t, w_tb, b_t = params
+
+        # (W.xtt + b) *
+        out = np.dot(x, W) + b
+        # sigmoid(a.t + c)  +
+        out *= jax.nn.sigmoid(w_t * t + w_tb)
+        # d.t
+        out += b_t * t
+
+        return (out, t)
+    return init_fun, apply_fun
+
+
+# dimension_numbers = ('NCHW', 'OIHW', 'NCHW') # torch version
+dimension_numbers = ('NHWC', 'HWIO', 'NHWC')
+
+
+def IgnoreConv2D(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
         )
-        # Make this selection a one-time cost, as opposed to putting if-else checks in `forward`.
-        self.unpack_params = self.unpack_wb if bias else self.unpack_w
-
-    def forward(self, t, y, params: Optional[List] = None):
-        weight, bias = self.unpack_params(params)  # noqa
-        ty = utils.channel_cat(t, y)
-
-        if self.padding_mode != 'zeros':
-            return F.conv2d(
-                F.pad(ty, self._reversed_padding_repeated_twice, mode=self.padding_mode),
-                weight, bias, self.stride, _pair(0), self.dilation, self.groups
-            )
-        return F.conv2d(ty, weight, bias, self.stride, self.padding, self.dilation, self.groups)
-
-    def unpack_wb(self, params: Optional[List] = None):  # noqa
-        if params is None:
-            return self.weight, self.bias
-        return params
-
-    def unpack_w(self, params: Optional[List] = None):  # noqa
-        if params is None:
-            return self.weight, self.bias
-        return params[0], None  # Bias is None.
-
-
-class ConcatConvTranspose2d(nn.ConvTranspose2d, DiffEqModule):
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 kernel_size: _size_2_t,
-                 stride: _size_2_t = 1,
-                 padding: _size_2_t = 0,
-                 output_padding: _size_2_t = 0,
-                 groups: int = 1,
-                 bias: bool = True,
-                 dilation: int = 1,
-                 padding_mode: str = 'zeros'):
-        super(ConcatConvTranspose2d, self).__init__(
-            in_channels=in_channels + 1,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            output_padding=output_padding,
-            groups=groups,
-            bias=bias,
-            dilation=dilation,
-            padding_mode=padding_mode
-        )
-        self.unpack_params = self.unpack_wb if bias else self.unpack_w
-
-    def forward(self, t, y, params: Optional[List] = None, output_size: Optional[List[int]] = None):
-        if self.padding_mode != 'zeros':
-            raise ValueError('Only `zeros` padding mode is supported for ConvTranspose2d')
-
-        weight, bias = self.unpack_params(params)  # noqa
-        ty = utils.channel_cat(t, y)
-        output_padding = self._output_padding(ty, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims=2)  # noqa
-        return F.conv_transpose2d(
-            ty, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
-
-    def unpack_wb(self, params: Optional[List] = None):  # noqa
-        if params is None:
-            return self.weight, self.bias
-        return params
-
-    def unpack_w(self, params: Optional[List] = None):  # noqa
-        if params is None:
-            return self.weight, self.bias
-        return params[0], None  # Bias is None.
-
-
-class Linear(nn.Linear, DiffEqModule):
-    def __init__(self, in_features: int, out_features: int):
-        super(Linear, self).__init__(in_features=in_features, out_features=out_features)
-
-    def forward(self, t, y, params: Optional[List] = None):
-        w, b = (self.weight, self.bias) if params is None else params
-        return F.linear(y, w, b)
-
-
-class ConcatLinear(nn.Linear, DiffEqModule):
-    def __init__(self, in_features: int, out_features: int):
-        super(ConcatLinear, self).__init__(
-            in_features=in_features + 1,  # Extra time channel!
-            out_features=out_features,
-        )
-
-    def forward(self, t, y, params: Optional[List] = None):
-        w, b = (self.weight, self.bias) if params is None else params
-        ty = utils.channel_cat(t, y)
-        return F.linear(ty, w, b)
-
-
-class ConcatSquashLinear(nn.Linear, DiffEqModule):
-    def __init__(self, in_features: int, out_features: int):
-        super(ConcatSquashLinear, self).__init__(
-            in_features=in_features + 1,  # Extra time channel!
-            out_features=out_features
-        )
-        self.wt = nn.Parameter(torch.randn(1, self.out_features))
-        self.by = nn.Parameter(torch.randn(1, self.out_features))
-        self.b = nn.Parameter(torch.randn(1, self.out_features))
-
-    def forward(self, t, y, params: Optional[List] = None):
-        wy, by, wt, bt, b = (self.weight, self.bias, self.wt, self.bt, self.b) if params is None else params
-        ty = utils.channel_cat(t, y)
-
-        net = F.linear(ty, wy, by)
-        scale = torch.sigmoid(t * wt + bt)
-        shift = b * t
-        return scale * net + shift
-
-    def make_initial_params(self):
-        return [
-            self.weight.clone(),  # wy
-            self.bias.clone(),  # by
-            torch.randn(1, self.out_features),  # wt
-            torch.randn(1, self.out_features),  # bt
-            torch.randn(1, self.out_features),  # b
-        ]
-
-
-class SqueezeDownsample(DiffEqModule):
-    def __init__(self):
-        super(SqueezeDownsample, self).__init__()
-
-    def forward(self, t, y, *args, **kwargs):  # noqa
-        del t, args, kwargs
-        b, c, h, w = y.size()
-        return y.reshape(b, c * 4, h // 2, w // 2)
-
-
-class ConvDownsample(ConcatConv2d):
-    def __init__(self, input_size):
-        c, h, w = input_size
-        super(ConvDownsample, self).__init__(
-            in_channels=c,
-            out_channels=c * 4,
-            kernel_size=3,
-            stride=2,
-            padding=1
-        )
-
-
-class LayerNormalization(nn.LayerNorm, DiffEqModule):
-    def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, elementwise_affine: bool = True):
-        super(LayerNormalization, self).__init__(
-            normalized_shape=normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
-
-    def forward(self, t, y, params: Optional[List] = None):  # noqa
-        del t
-        weight, bias = (self.weight, self.bias) if params is None else params
-        return F.layer_norm(y, self.normalized_shape, weight, bias, self.eps)
-
-
-class Print(DiffEqModule):
-    def __init__(self, name=None):
-        super(Print, self).__init__()
-        self.name = name
-
-    def forward(self, t, y, *args, **kwargs):
-        del t, args, kwargs
-        msg = (
-            f"size: {y.size()}, "
-            f"mean: {y.mean()}, "
-            f"abs mean: {y.abs().mean()}, "
-            f"max: {y.max()}, "
-            f"abs max: {y.abs().max()}, "
-            f"min: {y.min()}, "
-            f"abs min: {y.abs().min()}"
-        )
-        if self.name is not None:
-            msg = f"{self.name}, " + msg
-        logging.warning(msg)
-        return y
-
-
-def make_ode_k3_block(input_size, activation="softplus", squeeze=False):
-    """Make a block of kernel size 3 for all convolutions."""
-    return DiffEqSequential(*make_ode_k3_block_layers(input_size, activation, squeeze))
-
-
-def make_ode_k3_block_layers(input_size,
-                             activation="softplus",
-                             squeeze=False,
-                             last_activation=True,
-                             hidden_width=128,
-                             mode=0):
-    channels, height, width = input_size
-    activation = utils.select_activation(activation)
-    if mode == 0:
-        layers = [
-            ConcatConv2d(in_channels=channels, out_channels=hidden_width, kernel_size=3, padding=1),
-            DiffEqWrapper(activation()),
-            ConcatConv2d(in_channels=hidden_width, out_channels=hidden_width, kernel_size=3, stride=2, padding=1),
-            DiffEqWrapper(activation()),
-            ConcatConvTranspose2d(
-                in_channels=hidden_width, out_channels=hidden_width, kernel_size=3, stride=2, output_padding=1),
-            DiffEqWrapper(activation()),
-            ConcatConv2d(in_channels=hidden_width, out_channels=channels, kernel_size=3),
-        ]
     else:
-        layers = [
-            ConcatConv2d(in_channels=channels, out_channels=hidden_width, kernel_size=3, padding=1),
-            DiffEqWrapper(activation()),
-            ConcatConv2d(in_channels=hidden_width, out_channels=hidden_width, kernel_size=3, padding=1),
-            DiffEqWrapper(activation()),
-            ConcatConv2d(in_channels=hidden_width, out_channels=channels, kernel_size=3, padding=1),
-        ]
-    if last_activation:
-        layers.extend([DiffEqWrapper(activation())])
-    if squeeze:
-        layers.extend([ConvDownsample(input_size=input_size)])
-    return layers
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        out = apply_fun_wrapped(params, x, **kwargs)
+        return (out, t)
+
+    return init_fun_wrapped, apply_fun_wrapped
+
+
+def ConcatConv2D(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+    else:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def init_fun(rng, input_shape):  # note, input shapes only take x
+        concat_input_shape = list(input_shape)
+        concat_input_shape[-1] += 1    # add time channel dim
+        concat_input_shape = tuple(concat_input_shape)
+        return init_fun_wrapped(rng, concat_input_shape)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        tt = np.ones_like(x[:, :, :, :1]) * t
+        xtt = np.concatenate([x, tt], axis=-1)
+        out = apply_fun_wrapped(params, xtt, **kwargs)
+        return (out, t)
+
+    return init_fun, apply_fun
+
+
+def ConcatConv2D_v2(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+    else:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def init_fun(rng, input_shape):
+        k1, k2 = random.split(rng)
+        output_shape_conv, params_conv = init_fun_wrapped(k1, input_shape)
+        W_hyper_bias = W_init(k2, (1, out_dim))
+
+        return output_shape_conv, (params_conv, W_hyper_bias)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        params_conv, W_hyper_bias = params
+        out = apply_fun_wrapped(params_conv, x, **kwargs) + np.dot(t.view(1, 1),
+                                                                   W_hyper_bias).view(1, 1, 1, -1)  # if ncwh stead of nhwc: .view(1, -1, 1, 1)
+        return (out, t)
+
+    return init_fun, apply_fun
+
+
+def ConcatSquashConv2D(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+    else:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def init_fun(rng, input_shape):
+        k1, k2, k3, k4 = random.split(rng, 4)
+        output_shape_conv, params_conv = init_fun_wrapped(k1, input_shape)
+        W_hyper_gate, b_hyper_gate = W_init(
+            k2, (1, out_dim)), b_init(k3, (out_dim,))
+        W_hyper_bias = W_init(k4, (1, out_dim))
+        return output_shape_conv, (params_conv, W_hyper_gate, b_hyper_gate, W_hyper_bias)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        params_conv, W_hyper_gate, b_hyper_gate, W_hyper_bias = params
+        conv_out = apply_fun_wrapped(params_conv, x, **kwargs)
+        gate_out = jax.nn.sigmoid(
+            np.dot(t.view(1, 1), W_hyper_gate) + b_hyper_gate).view(1, 1, 1, -1)
+        bias_out = np.dot(t.view(1, 1), W_hyper_bias).view(1, 1, 1, -1)
+        out = conv_out * gate_out + bias_out
+        return (out, t)
+
+    return init_fun, apply_fun
+
+
+def ConcatCoordConv2D(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+    else:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def init_fun(rng, input_shape):
+        concat_input_shape = list(input_shape)
+        # add time and coord channels; from 1 (torch) -> 0
+        concat_input_shape[-1] += 3
+        concat_input_shape = tuple(concat_input_shape)
+        return init_fun_wrapped(rng, concat_input_shape)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        b, h, w, c = x.shape
+        hh = np.arange(h).view(1, h, 1, 1).expand(b, h, w, 1)
+        ww = np.arange(w).view(1, 1, w, 1).expand(b, h, w, 1)
+        tt = t.view(1, 1, 1, 1).expand(b, h, w, 1)
+        x_aug = np.concatenate([x, hh, ww, tt], axis=-1)
+        out = apply_fun_wrapped(params, x_aug, **kwargs)
+        return (out, t)
+
+    return init_fun, apply_fun
+
+
+def GatedConv2D(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+    else:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def init_fun(rng, input_shape):
+        k1, k2 = random.split(rng)
+        output_shape, params_f = init_fun_wrapped(k1, input_shape)
+        _, params_g = init_fun_wrapped(k2, input_shape)
+        return output_shape, (params_f, params_g)
+
+    def apply_fun(params, inputs, **kwargs):
+        params_f, params_g = params
+        f = apply_fun_wrapped(params_f, inputs)
+        g = jax.nn.sigmoid(apply_fun_wrapped(params_g, inputs))
+        return f * g
+
+    return init_fun, apply_fun
+
+
+def BlendConv2D(out_dim, W_init=he_normal(), b_init=normal(), kernel=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
+    assert dilation == 1 and groups == 1
+    if not transpose:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConv(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+    else:
+        init_fun_wrapped, apply_fun_wrapped = stax.GeneralConvTranspose(
+            dimension_numbers, out_chan=out_dim, filter_shape=(
+                kernel, kernel), strides=(stride, stride), padding=padding
+        )
+
+    def init_fun(rng, input_shape):
+        k1, k2 = random.split(rng)
+        output_shape, params_f = init_fun_wrapped(k1, input_shape)
+        _, params_g = init_fun_wrapped(k2, input_shape)
+        return output_shape, (params_f, params_g)
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        params_f, params_g = params
+        f = apply_fun_wrapped(params_f, x)
+        g = apply_fun_wrapped(params_g, x)
+        out = f + (g - f) * t
+        return (out, t)
+
+    return init_fun, apply_fun
+
+
+def DiffEqWrapper(layer):
+    """Wrapper for time dependent layers
+    """
+    init_fun, layer_apply_fun = layer
+
+    def apply_fun(params, inputs, **kwargs):
+        x, t = inputs
+        return layer_apply_fun(params, x, **kwargs), t
+    return init_fun, apply_fun
+
+
+if __name__ == "__main__":
+
+    init_fn, apply_fn = stax.serial(
+        IgnoreLinear(20),
+        DiffEqWrapper(stax.Relu),
+        IgnoreLinear(20),
+        DiffEqWrapper(stax.Relu)
+    )
+
+    key = random.PRNGKey(0)
+    out_shape, params = init_fn(key, (-1, 2))  # includes the batch dimension
+
+    x = random.normal(key, (5, 2))
+    t = np.array(0.5)
+    t, out = apply_fn(params, (x, t))
+
+    print(out.shape)
+    print(t.shape)

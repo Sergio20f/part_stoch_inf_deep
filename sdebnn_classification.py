@@ -1,350 +1,513 @@
+"""Train SDEBNN model on vision datasets. MNIST/CIFAR examples provided.
+"""
 import argparse
-import collections
-import copy
-import gc
 import logging
+import itertools
 import math
 import os
+import pickle
 import time
+from functools import partial
+from pathlib import Path
 
-import models
+import numpy as np
+import arch, brax
+from resnet import resnet32v2
 import utils
-import tqdm
+from datasets import get_dataset
+from tqdm import tqdm
 
-import torch
-import torch.nn.functional as F
-from torch import optim
+import jax
+import jax.numpy as jnp
+from jax import grad, jit, vmap
+from jax.example_libraries import optimizers, stax
+from jax.flatten_util import ravel_pytree
+from jax.tree_util import tree_map
 from torch.utils.tensorboard import SummaryWriter
 
-print(torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
 
-def train(model, ema_model, optimizer, scheduler, epochs, global_step=0, output_dir=None, start_epoch=0,
-          best_test=0, best_val=0, info=collections.defaultdict(dict), tb_writer=None):
-    
-    def add_scalar_(name: str, arg1, arg2):
-        if torch.is_tensor(arg1):
-            if arg1.dim() == 0:  # Check for 0-dimensional tensor
-                tb_writer.add_scalar(name, arg1.item(), arg2)
-            elif arg1.dim() == 1:  # Check for 1-dimensional tensor
-                tb_writer.add_scalar(name, arg1[0].item(), arg2)
-            else:
-                # Handle other dimensions if necessary
-                pass
+def _nll(params, batch, rng):
+    inputs, targets = batch
+    preds, kl, info_dict = _predict(params, inputs, rng=rng, full_output=False)
+    nll = -jnp.mean(jnp.sum(preds * targets, axis=1))
+    return preds, nll, kl, info_dict
+
+
+@partial(jit, static_argnums=(3,))
+def sep_loss(params, batch, rng, kl_coef):  # no backprop
+    preds, nll, kl, _ = _nll(params, batch, rng)
+    if kl_coef > 0:
+        obj_loss = nll + kl * kl_coef
+    else:
+        obj_loss = nll
+    _sep_loss = {'loss': obj_loss, 'kl': kl, 'nll': nll, 'preds': preds}
+    return obj_loss, _sep_loss
+
+
+@partial(jit, static_argnums=(3,))
+def loss(params, batch, rng, kl_coef):  # backprop so checkpoint
+    _, nll, kl, _ = jax.checkpoint(_nll)(params, batch, rng)
+    if kl_coef > 0:
+        return nll + kl * kl_coef
+    else:
+        return nll
+
+@jit
+def predict(params, inputs, rng): 
+    return _predict(params, inputs, rng=rng, full_output=True)
+
+@partial(jit, static_argnums=(2,))
+def accuracy(params, data, nsamples, rng):
+    inputs, targets = data
+    target_class = jnp.argmax(targets, axis=1)
+    rngs = jax.random.split(rng, nsamples)
+    preds, _, info_dic = vmap(predict, in_axes=(None, None, 0))(params, inputs, rngs)
+    preds = jnp.stack(preds, axis=0)
+    avg_preds = preds.mean(0)
+    predicted_class = jnp.argmax(avg_preds, axis=1)
+    n_correct = jnp.sum(predicted_class == target_class)
+    n_total = inputs.shape[0]
+    wts = info_dic['psdebnn_h_w'] # info_dic['sdebnn_w'] HAVE TO MANUALLY CHANGE THIS
+    wts = jnp.stack(wts, axis=0)
+    avg_wts = wts.mean(0)
+    return n_correct, n_total, avg_preds, avg_wts
+
+def update_ema(ema_params, params, momentum=0.999):
+    return jax.tree_util.tree_map(lambda e, p: e * momentum + p * (1 - momentum), ema_params, params)
+
+
+def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
+    n_total = 0
+    n_correct = 0
+    nll = 0
+    kl = 0
+    logits = np.array([])
+    wts = np.array([])
+    labels = np.array([])
+    for inputs, targets in data_loader:
+        targets = jax.nn.one_hot(jnp.array(targets), num_classes=10)
+        inputs = jnp.array(inputs).reshape((-1,) + (input_size[-1],) + input_size[:2])
+        inputs = jnp.transpose(inputs, (0, 2, 3, 1))  # Permute from NCHW to NHWC
+        batch_correct, batch_total, _logits, _wts = accuracy(
+            params, (inputs, targets), nsamples, rng_generator.next()
+        ) # _logits (nbatch, nclass)
+        n_correct = n_correct + batch_correct
+        _, batch_nll, batch_kl, _ = jit(_nll)(params, (inputs, targets), rng_generator.next())
+        if n_total == 0:
+            logits = np.array(_logits)
+            wts = np.array(_wts)
+            labels = np.array(targets)
         else:
-            tb_writer.add_scalar(name, arg1, arg2)
-    
-    train_xent = utils.EMAMeter()
-    train_accuracy = utils.EMAMeter()
-    test_accuracy, best_test_acc = 0, best_test
-    val_xent, val_xent_ema, val_accuracy, best_val_acc = 0, 0, 0, best_val
-    obj, kl, ece, nfe = 0, 0, utils.AverageMeter(), utils.AverageMeter()
-    epoch_start = time.time()
-    for epoch in range(start_epoch, epochs):
-        itr_per_epoch = 0
-        for i, (x, y) in tqdm.tqdm(enumerate(train_loader)):
-            model.train()
-            model.zero_grad()
-            x, y = x.to(device), y.to(device, non_blocking=True)
-            logits, logqp = model(
-                x, dt=args.dt, adjoint=args.adjoint, method=args.method, adaptive=args.adaptive, adjoint_adaptive=args.adjoint_adaptive, rtol=args.rtol, atol=args.atol
-            )
-            nfes = model.nfe
-            xent = F.cross_entropy(logits, y, reduction="mean")
-            loss = xent + args.kl_coeff * logqp
-            obj, kl = loss, args.kl_coeff * logqp
-            predictions = logits.detach().argmax(dim=1)
-            accuracy = torch.eq(predictions, y).float().mean()
-            train_ece = utils.score_model(logits.detach().cpu().numpy(), y.detach().cpu().numpy())[2]
-            ece.step(train_ece)
-            nfe.step(nfes)
-            loss.mean().backward()  # retain_graph=True
-            optimizer.step()
-            scheduler.step()
-            train_xent.step(loss.mean())
-            train_accuracy.step(accuracy)
-            utils.ema_update(model=model, ema_model=ema_model, gamma=args.gamma)
-            global_step += 1
-            itr_per_epoch += 1
-            gc.collect()
-            # per itr nfes: {global step: [train nfe, [for each pause_every:] val nfe, val nfe ema, test nfe,
-            # test nfe ema]}
-            info["nfes"] = {global_step: [nfes]}
-
-            if global_step % args.pause_every == 0:
-                # tb_writer.add_scalar(f'Grad Norm (pause/{args.pause_every})', torch.norm(x.grad), global_step)
-                # TODO: magnitude of learned drift function
-                # drift_y = model.f(0, aug_y)[:y.numel()]
-                add_scalar_(f'Activation Norm (pause/{args.pause_every})', torch.norm(y.detach().cpu().float()).numpy().mean(), global_step)
-                add_scalar_(f'NFE/train (pause/{args.pause_every})', nfes, global_step)
-                val_xent, val_accuracy, val_ece, val_nfe = evaluate(model, validate=True)
-                val_xent_ema, val_accuracy_ema, val_ece_ema, val_nfe_ema = evaluate(ema_model, validate=True)
-                info['nfes'][global_step].extend([val_nfe, val_nfe_ema])
-                if val_accuracy > best_val_acc:
-                    best_val_acc = val_accuracy
-                    utils.save_ckpt(model, ema_model, optimizer, os.path.join(output_dir, "best_val_acc.ckpt"),
-                                    scheduler, epoch=epoch, global_step=global_step, best_acc=best_test_acc,
-                                    best_val=best_val_acc, info=info)
-                add_scalar_('Accuracy/val', val_accuracy, global_step)
-                add_scalar_('Accuracy EMA/val', val_accuracy_ema, global_step)
-                add_scalar_('NLL/val', val_xent, global_step)
-                add_scalar_('NLL EMA/val', val_xent_ema, global_step)
-                add_scalar_('ECE/val', val_ece, global_step)
-                add_scalar_('ECE EMA/val', val_ece_ema, global_step)
-                add_scalar_('NFE/val (total/inference)', val_nfe, global_step)
-                add_scalar_('NFE EMA/val (total/inference)', val_nfe_ema, global_step)
-                logging.warning(
-                    f"global step: {global_step}, "
-                    f"epoch: {epoch}, "
-                    f"train_xent: {train_xent.val:.4f}, "
-                    f"train_accuracy: {train_accuracy.val:.4f}, "
-                    f"val_xent: {val_xent:.4f}, "
-                    f"val_accuracy: {val_accuracy:.4f}, "
-                    f"val_xent_ema: {val_xent_ema:.4f}, "
-                    f"val_accuracy_ema: {val_accuracy_ema:.4f}"
-                )
-
-        epoch_time = epoch_start - time.time()
-        utils.save_ckpt(model, ema_model, optimizer, os.path.join(output_dir, "state.ckpt"), scheduler, epoch=epoch,
-                        global_step=global_step, best_val=best_val_acc, best_acc=best_test_acc, info=info)
-        # import pdb; pdb.set_trace()
-        add_scalar_('Accuracy/train', train_accuracy.val, epoch)
-        add_scalar_('NLL/train', train_xent.val, epoch)
-        add_scalar_('KL/train', kl, epoch)
-        add_scalar_('Loss/train', obj, epoch)
-        add_scalar_('ECE/train', ece.val, epoch)
-        add_scalar_('NFE/train (avg/epoch)', nfe.val, epoch)
-        nfe.__init__()  # reset for new epoch
-        logging.warning("Wrote training scalars to tensorboard")
-
-        test_xent, test_accuracy, test_ece, test_nfe = evaluate(model)
-        test_xent_ema, test_accuracy_ema, test_ece_ema, test_nfe_ema = evaluate(ema_model)
-        info['nfes'][global_step].extend([test_nfe, test_nfe_ema])
-        add_scalar_('Accuracy/test', test_accuracy, epoch)
-        add_scalar_('Accuracy EMA/test', test_accuracy_ema, epoch)
-        add_scalar_('NLL/test', test_xent, epoch)
-        add_scalar_('NLL EMA/test', test_xent_ema, global_step)
-        add_scalar_('ECE/test', test_ece, epoch)
-        add_scalar_('ECE EMA/test', test_ece_ema, epoch)
-        add_scalar_('NFE/test (total/inference)', test_nfe, epoch)
-        add_scalar_('NFE EMA/test (total/inference)', test_nfe_ema, epoch)
-        logging.warning("Wrote test scalars to tensorboard")
-        if test_accuracy > best_test_acc:
-            best_test_acc = test_accuracy
-            utils.save_ckpt(model, ema_model, optimizer, os.path.join(output_dir, "best_test_acc.ckpt"), scheduler,
-                            epoch=epoch, global_step=global_step, best_val=best_val_acc, best_acc=best_test_acc,
-                            info=info)
-        with open(os.path.join(output_dir, "results.txt"), "a") as f:
-            f.write(f"Epoch {epoch} (step {global_step}) in {epoch_time:.4f} sec | Train acc {train_accuracy.val}" + \
-                    f" | Test accuracy {test_accuracy} | Test EMA accuracy {test_accuracy_ema}" + \
-                    f" | Train NLL {train_xent.val} | Test NLL {test_xent} | Test EMA NLL {test_xent_ema} | Train "
-                    f"Loss " + \
-                    f" {obj.mean().detach().cpu().numpy().tolist()} | Train KL {kl}" + \
-                    f" | Train ECE {ece.val} | Test ECE {test_ece} | Test ECE EMA {test_ece_ema}" + \
-                    f" | Train nfes {nfe.val} | Test NFE {test_nfe} | Test NFE EMA {test_nfe_ema}\n") # changes Train Loss obj.mean()
-            logging.warning(f"Wrote epoch info to {os.path.join(output_dir, 'results.txt')}")
-        info[global_step] = {'epoch': epoch, 'time': epoch_time, 'train_acc': train_accuracy.val,
-                             'test_acc': test_accuracy,
-                             'train_nll': train_xent.val, 'test_nll': test_xent, 'test_ema_nll': test_xent_ema,
-                             'train_loss': obj.detach().cpu().numpy().tolist(),
-                             'train_kl': kl.detach().cpu().numpy().tolist(), "val_acc": val_accuracy,
-                             "val_xent": val_xent, "val_xent_ema": val_xent_ema,
-                             "train_ece": ece.val, "test_ece": test_ece, "test_ece_ema": test_ece_ema,
-                             "itr_per_epoch": itr_per_epoch, "avg_train_nfe": nfe.val,
-                             "test_nfe": test_nfe, "test_nfe_ema": test_nfe_ema}
-        utils.write_state_config(info, args.train_dir, file_name='state.json')
-
-
-@torch.no_grad()
-def _evaluate_with_loader(model, loader):
-    xents = []
-    accuracies = []
-    eces = []
-    nfes = 0
-    model.eval()
-    for i, (x, y) in enumerate(loader, 1):
-        x, y = x.to(device), y.to(device, non_blocking=True)
-        logits, _ = model(x, dt=args.dt, adjoint=args.adjoint, adjoint_adaptive=args.adjoint_adaptive, method=args.method)  # , rtol=args.rtol, atol=args.atol)
-        loss = F.cross_entropy(logits, y, reduction="none")
-        predictions = logits.detach().argmax(dim=1)
-        accuracy = torch.eq(predictions, y).float()
-        scores = utils.score_model(logits.detach().cpu().numpy(), y.detach().cpu().numpy())
-        xents.append(loss)
-        accuracies.append(accuracy)
-        eces.append(torch.tensor([scores[2]]))
-        nfes += model.nfe
-        if i >= args.eval_batches: break
-    return tuple(torch.cat(x, dim=0).mean(dim=0).cpu().item() for x in (xents, accuracies, eces)) + (nfes,)
-
-
-def evaluate(model, validate=False):
-    if validate:
-        logging.warning("evaluating on validation set")
-        test_xent, test_accuracy, test_ece, test_nfe = _evaluate_with_loader(model, val_loader)
-    else:
-        logging.warning("evaluating on test set")
-        test_xent, test_accuracy, test_ece, test_nfe = _evaluate_with_loader(model, test_loader)
-    return test_xent, test_accuracy, test_ece, test_nfe
-
-
-def get_cosine_schedule_with_warmup(optimizer,
-                                    num_training_steps,
-                                    num_warmup_steps=0,
-                                    num_cycles=7. / 16.,
-                                    last_epoch=-1):
-    def _lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        no_progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-        return max(0., math.cos(math.pi * num_cycles * no_progress))
-
-    return optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda, last_epoch)
-
-
-def main():
-    input_chw = (3, 32, 32)
-    if args.data == "mnist":
-        input_chw = (1, 28, 28)
-    if args.model == "baseline":
-        model = models.BaselineYNet(
-            input_size=input_chw,
-            activation=args.activation,
-            hidden_width=args.hidden_width
-        )
-    elif args.model == "sdebnn":
-        model = models.SDENet(
-            input_size=input_chw,
-            inhomogeneous=args.inhomogeneous,
-            activation=args.activation,
-            verbose=args.verbose,
-            hidden_width=args.hidden_width,
-            weight_network_sizes=tuple(map(int, args.fw_width.split("-"))),
-            blocks=tuple(map(int, args.nblocks.split("-"))),
-            sigma=args.sigma,
-            aug_dim=args.aug,
-            mode=args.mode,
-        )
-    elif args.model == "partialsdenet":
-        model = models.PartialSDEnet(
-            input_size=input_chw,
-            inhomogeneous=args.inhomogeneous,
-            activation=args.activation,
-            verbose=args.verbose,
-            hidden_width=args.hidden_width,
-            weight_network_sizes=tuple(map(int, args.fw_width.split("-"))),
-            blocks=tuple(map(int, args.nblocks.split("-"))),
-            sigma=args.sigma,
-            aug_dim=args.aug,
-            timecut=args.timecut,
-            ode_first=args.ode_first,
-            mode=args.mode,
-        )
-    else:
-        raise ValueError(f"Unknown model: {args.model}")
-    ema_model = copy.deepcopy(model)
-    model.to(device)
-    ema_model.to(device)
-
-    optimizer = optim.Adam(lr=args.lr, params=model.parameters())
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_training_steps=args.epochs * (50000 // args.batch_size))
-
-    start_epoch, best_test_acc, best_val_acc, global_step = 0, 0, 0, 0
-    info = collections.defaultdict(dict)
-    if os.path.exists(os.path.join(args.train_dir, "state.ckpt")):
-        # if os.path.exists(os.path.join(args.train_dir, "best_val_acc.ckpt")): # TODO: for debugging
-        logging.warning("Loading checkpoints...")
-        checkpoint = torch.load(os.path.join(args.train_dir, "state.ckpt"))
-        # checkpoint = torch.load(os.path.join(args.train_dir, "best_val_acc.ckpt")) # TODO: for debugging
-        start_epoch = checkpoint['epoch']
-        best_test_acc = checkpoint['best_acc']
-        best_val_acc = checkpoint['best_val_acc']
-        info = checkpoint['info']
-        global_step = checkpoint['global_step']
-        model.load_state_dict(checkpoint["model"])
-        ema_model.load_state_dict(checkpoint["ema_model"])
-        scheduler.load_state_dict(checkpoint["scheduler"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        logging.warning(f"Successfully loaded checkpoints for epoch {start_epoch} | best acc {best_test_acc}")
-
-    logging.warning(f'model: {model}')
-    logging.warning(f'{utils.count_parameters(model) / 1e6:.4f} million parameters')
-
-    tb_writer = SummaryWriter(os.path.join(args.train_dir, 'tb'))
-    train(
-        model, ema_model, optimizer, scheduler, args.epochs,
-        output_dir=args.train_dir, global_step=global_step, start_epoch=start_epoch,
-        best_test=best_test_acc, best_val=best_val_acc, info=info, tb_writer=tb_writer
-    )
-    tb_writer.close()
+            logits = np.concatenate([logits, np.array(_logits)], axis=0)
+            wts = np.concatenate([wts, np.array(_wts)], axis=0)
+            labels = np.concatenate([labels, targets], axis=0)
+        n_total = n_total + batch_total
+        nll = nll + batch_nll
+        kl = kl + batch_kl
+    return n_correct / n_total, jnp.stack(logits, axis=0), labels, nll / n_total, kl / n_total, jnp.stack(wts, axis=0)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--train-dir', type=str, default='train-sde-cifar', required=False)
-    parser.add_argument('--seed', type=int, default=1000000)
-    parser.add_argument('--no-gpu', action="store_true")
-    parser.add_argument('--subset', type=int, default=None, help="Use subset of mnist data.")
-    parser.add_argument('--data', type=str, default="cifar10", choices=['mnist', 'cifar10', 'cifar100'])
-    parser.add_argument('--pin-memory', type=utils.str2bool, default=True)
-    parser.add_argument('--num-workers', type=int, default=8)
-    parser.add_argument('--model', type=str, choices=['baseline', 'sdebnn', 'partialsdenet'], default='sdebnn')
-    parser.add_argument('--method', type=str, choices=['milstein', 'midpoint', "heun", "euler_heun", "euler"], default='euler')
-    parser.add_argument('--gamma', type=float, default=0.999)
+    parser = argparse.ArgumentParser(description="PSDE-BNN-H CIFAR10 Training")
+    parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet", "psdenet_h"], default="psdenet_h")
+    parser.add_argument("--output", type=str, default="output-psde-horizontal-05", help="(default: %(default)s)")
+    parser.add_argument("--seed", type=int, default=42) # 0
+    parser.add_argument("--stl", action="store_true")
+    parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
+    parser.add_argument("--epochs", type=int, default=100, help="(default: %(default)s)")
+    parser.add_argument("--bs", type=int, default=128, help="(default: %(default)s)")
+    parser.add_argument("--test_bs", type=int, default=1000)
+    parser.add_argument("--nsamples", type=int, default=1)
+    parser.add_argument("--w_init", type=float, default=-1., help="scale the last layer W init of w_net. default: $(default)")
+    parser.add_argument("--b_init", type=float, default=-1., help="scale the last layer b init of w_net. default: $(default)")
+    parser.add_argument("--p_init", type=float, default=-1., help="scale the output of w_net by exp(p) so that diffusion doesn't overpower. default: $(default)")
+    parser.add_argument('--pause-every', type=int, default=200) # 200
 
-    parser.add_argument('--lr', type=float, default=7e-4) # MNIST: 1e-3; CIFAR: 7e-4
-    parser.add_argument('--aug', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=200) # 200
-    parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--eval-batch-size', type=int, default=512)
-    parser.add_argument('--pause-every', type=int, default=200)
-    parser.add_argument('--eval-batches', type=int, default=10000)
+    parser.add_argument("--no_drift", action="store_true")
+    parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
+    # for PSDEBNN makes sense to have kl_coef as a function of the timecut (1/(timecut))*10**-4
+    #parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)")
+    parser.add_argument("--kl_coef", type=float, default=(1/(0.5))*10**-4, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
+    parser.add_argument("--diff_coef", type=float, default=0.1, help="(default: %(default)s)") # CHANGE 0.1
+    parser.add_argument("--ds", type=str, choices=["mnist", "cifar10"], default="cifar10", help="(default: %(default)s)")
+    parser.add_argument("--no_xt", action="store_false", help="time dependent")
+    parser.add_argument("--acc_grad", type=int, default=1)
+    parser.add_argument("--aug", type=int, default=0, help="(default: %(default)s)")
+    parser.add_argument("--remat", action="store_true")
+    parser.add_argument("--ema", type=float, default=0.999)
+    parser.add_argument("--meanfield_sdebnn", action="store_true")
+    parser.add_argument("--infer_w0", action="store_true", help="don't learn w0 initial state, infer initial with Gaussian variational dist'n")
+    parser.add_argument("--w0_prior_std", type=float, default=0.1, help="initial w0 state prior std")
+    parser.add_argument("--disable_test", action="store_true")
+    parser.add_argument("--verbose", default=True, action="store_true")
 
-    # Model.
-    parser.add_argument('--dt', type=float, default=0.1) # change to 0.05
-    parser.add_argument('--rtol', type=float, default=1e-5)
-    parser.add_argument('--atol', type=float, default=1e-4)
-    parser.add_argument('--steps', type=int, default=20)
-    parser.add_argument('--adjoint', type=utils.str2bool, default=False)
-    parser.add_argument('--adaptive', type=utils.str2bool, default=False)
-    parser.add_argument('--adjoint_adaptive', type=utils.str2bool, default=False)
-    parser.add_argument('--inhomogeneous', type=utils.str2bool, default=True)
-    parser.add_argument('--activation', type=str, default="softplus",
-                        choices=['swish', 'mish', 'softplus', 'tanh', 'relu', 'elu'])
-    parser.add_argument('--verbose', type=utils.str2bool, default=False)
-    parser.add_argument('--hidden-width', type=int, default=64) # MNIST: 32; CIFAR: 64
-    parser.add_argument('--fw-width', type=str, default="2-128-2") # MNIST: 1-64-1; CIFAR: 2-128-2
-    parser.add_argument('--nblocks', type=str, default="2-2-2") # MNIST: 1; CIFAR: 2-2-2
-    parser.add_argument('--sigma', type=float, default=0.1) # MNIST: 0.1; CIFAR: 0.1
-    parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
-    parser.add_argument('--mode', type=int, default=0) # Mode: 1 for MNIST; 0 for cifar10
-    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
-
-    parser.add_argument('--momentum', type=float, default=0.9)
-    parser.add_argument('--nesterov', type=utils.str2bool, default=True)
-    parser.add_argument('--kl-coeff', type=float, default=1e-3, help='Coefficient on the KL term.')
+    parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
+    parser.add_argument('--timecut', type=float, default=0.5) # Time step that divides SDE from ODE
+    parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
+    parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
+    parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
+    parser.add_argument("--nsteps", type=int, default=30, help="(default: %(default)s)") # 20, Let's use 30 for now, 40 possible
+    parser.add_argument("--block_type", type=int, choices=[0, 1, 2], default=0, help="(default: %(default)s)")
+    parser.add_argument("--fx_dim", type=int, default=64, help="(default: %(default)s)")
+    parser.add_argument("--fx_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
+    parser.add_argument("--fw_dims", type=str, default="1-64-1", help="dash-separated integers (default: %(default)s)") # 2-128-2 for PSDEBNN(v) and SDEBNN
+    parser.add_argument("--fw_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
+    parser.add_argument("--lr_sched", type=str, choices=['constant', 'custom', 'custom2', 'stair', 'exp', 'inv', 'cos', 'warmup'], default="constant", help="(default: %(default)s)")
     args = parser.parse_args()
+    print(args)
 
-    device = torch.device('cuda' if torch.cuda.is_available() and not args.no_gpu else 'cpu')
-    torch.backends.cudnn.benchmark = True  # noqa
+    rng_generator = utils.jaxRNG(seed=args.seed)
+    output_dir = Path(args.output)
+    output_dir.mkdir(exist_ok=True, parents=True)
+    tb_writer = SummaryWriter(os.path.join(output_dir, 'tb'))
 
-    utils.manual_seed(args)
-    utils.write_config(args)
+    train_loader, train_eval_loader, val_loader, test_loader, input_size, train_size = get_dataset(args.bs, args.test_bs, args.ds)
+    num_batches = len(train_loader)
+    print(f"Number of batches: {num_batches}")
+    train_batches = utils.inf_generator(train_loader)
 
-    print(args.pin_memory, args.num_workers)
+    mf = partial(brax.MeanField, disable=True) if args.kl_coef == 0. else brax.MeanField
 
-    train_loader, val_loader, test_loader = utils.get_loader(
-        args.data,
-        train_batch_size=args.batch_size,
-        test_batch_size=args.eval_batch_size,
-        pin_memory=args.pin_memory,
-        num_workers=args.num_workers,
-        subset=args.subset,
-        task="classification"
-    )
+    if args.model == "resnet":
+        layers = resnet32v2(expansion=1,
+                            normalization_method="",
+                            use_fixup=False,
+                            option="B",
+                            init="he",
+                            actfn=stax.Relu)
+        resnet = stax.serial(*layers, stax.Flatten, stax.Dense(10), stax.LogSoftmax)
+        init_random_params, _predict = brax.bnn_serial(mf(resnet))
+    
+    elif args.model == "sdenet":
+        # SDEBNN.
+        fw_dims = list(map(int, args.fw_dims.split("-")))
 
-    logging.warning(
-        f"Training set size: {utils.count_examples(train_loader)}, "
-        f"Val set size: {utils.count_examples(val_loader)}, "
-        f"test set size: {utils.count_examples(test_loader)}"
-    )
+        layers = [mf(arch.Augment(args.aug))]
+        nblocks = list(map(int, args.nblocks.split("-")))
+        for i, nb in enumerate(nblocks):
+            fw = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # weight network is time dependent
+            if args.meanfield_sdebnn:
+                layers.extend([mf(brax.SDEBNN(args.block_type,
+                                              args.fx_dim,
+                                              args.fx_actfn,
+                                              fw,
+                                              diff_coef=args.diff_coef,
+                                              stl=args.stl,
+                                              xt=args.no_xt,
+                                              nsteps=args.nsteps,
+                                              remat=args.remat,
+                                              w_drift=not args.no_drift,
+                                              stax_api=True,
+                                              infer_initial_state=args.infer_w0,
+                                              initial_state_prior_std=args.w0_prior_std)) for _ in range(nb)
+                ])
+            else:
+                layers.extend([brax.SDEBNN(args.block_type,
+                                           args.fx_dim,
+                                           args.fx_actfn,
+                                           fw,
+                                           diff_coef=args.diff_coef,
+                                           stl=args.stl,
+                                           xt=args.no_xt,
+                                           nsteps=args.nsteps,
+                                           remat=args.remat,
+                                           w_drift=not args.no_drift,
+                                           infer_initial_state=args.infer_w0,
+                                           initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
+                ])
+            if i < len(nblocks) - 1:
+                layers.append(mf(arch.SqueezeDownsample(2)))
+        layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
 
-    main()
+        init_random_params, _predict = brax.bnn_serial(*layers)
+
+    elif args.model == "psdenet":
+        # PSDEBNN
+        fw_dims = list(map(int, args.fw_dims.split("-")))
+
+        layers = [mf(arch.Augment(args.aug))]
+        nblocks = list(map(int, args.nblocks.split("-")))
+        for i, nb in enumerate(nblocks):
+            fw = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # weight network is time dependent
+            if args.meanfield_sdebnn:
+                layers.extend([mf(brax.PSDEBNN(args.block_type,
+                                                args.fx_dim,
+                                                args.fx_actfn,
+                                                fw,
+                                                diff_coef=args.diff_coef,
+                                                stl=args.stl,
+                                                xt=args.no_xt,
+                                                nsteps=args.nsteps,
+                                                remat=args.remat,
+                                                w_drift=not args.no_drift,
+                                                stax_api=True,
+                                                infer_initial_state=args.infer_w0,
+                                                initial_state_prior_std=args.w0_prior_std,
+                                                timecut=args.timecut,
+                                                method_ode=args.method_ode,
+                                                fix_w1=args.fix_w1)) for _ in range(nb)
+                ])
+            else:
+                layers.extend([brax.PSDEBNN(args.block_type,
+                                            args.fx_dim,
+                                            args.fx_actfn,
+                                            fw,
+                                            diff_coef=args.diff_coef,
+                                            stl=args.stl,
+                                            xt=args.no_xt,
+                                            nsteps=args.nsteps,
+                                            remat=args.remat,
+                                            w_drift=not args.no_drift,
+                                            infer_initial_state=args.infer_w0,
+                                            initial_state_prior_std=args.w0_prior_std,
+                                            timecut=args.timecut,
+                                            method_ode=args.method_ode,
+                                            fix_w1=args.fix_w1) for _ in range(nb)
+                ])
+            if i < len(nblocks) - 1:
+                layers.append(mf(arch.SqueezeDownsample(2)))
+        layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
+
+        init_random_params, _predict = brax.bnn_serial(*layers)
+    
+    else:
+        # PSDEBNN
+        fw_dims = list(map(int, args.fw_dims.split("-")))
+
+        layers = [mf(arch.Augment(args.aug))]
+        nblocks = list(map(int, args.nblocks.split("-")))
+        for i, nb in enumerate(nblocks):
+            fw_s = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Stochastic weights
+            fw_d = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Deterministic weights
+            if args.meanfield_sdebnn:
+                layers.extend([mf(brax.PSDEBNN_H(args.block_type,
+                                              args.fx_dim,
+                                              args.fx_actfn,
+                                              fw1=fw_s,
+                                              fw2=fw_d,
+                                              ratio=args.timecut,
+                                              diff_coef=args.diff_coef,
+                                              stl=args.stl,
+                                              xt=args.no_xt,
+                                              nsteps=args.nsteps,
+                                              remat=args.remat,
+                                              w_drift=not args.no_drift,
+                                              stax_api=True,
+                                              infer_initial_state=args.infer_w0,
+                                              initial_state_prior_std=args.w0_prior_std)) for _ in range(nb)
+                ])
+            else:
+                layers.extend([brax.PSDEBNN_H(args.block_type,
+                                           args.fx_dim,
+                                           args.fx_actfn,
+                                           fw1=fw_s,
+                                           fw2=fw_d,
+                                           ratio=args.timecut,
+                                           diff_coef=args.diff_coef,
+                                           stl=args.stl,
+                                           xt=args.no_xt,
+                                           nsteps=args.nsteps,
+                                           remat=args.remat,
+                                           w_drift=not args.no_drift,
+                                           infer_initial_state=args.infer_w0,
+                                           initial_state_prior_std=args.w0_prior_std) for _ in range(nb)
+                ])
+            if i < len(nblocks) - 1:
+                layers.append(mf(arch.SqueezeDownsample(2)))
+        layers.append(mf(stax.serial(stax.Flatten, stax.Dense(10), stax.LogSoftmax)))
+
+        init_random_params, _predict = brax.bnn_serial(*layers)
+
+    lr = args.lr if args.lr_sched == "constant" else utils.get_lr_schedule(args.lr_sched, num_batches, args.lr)
+    opt_init, opt_update, get_params = optimizers.adam(lr)
+
+    loss_grad_fn = jit(vmap(grad(loss), in_axes=(None, None, 0, None)), static_argnums=(3,))
+
+    def update(i, opt_state, batch, acc_grad, nsamples, base_rng):
+        params = get_params(opt_state)
+        bsz = int(math.ceil(batch[0].shape[0] / acc_grad))
+        first_batch = (batch[0][:bsz], batch[1][:bsz])
+
+        rngs = jax.random.split(base_rng, nsamples)
+        grads = loss_grad_fn(params, first_batch, rngs, args.kl_coef / train_size)
+
+        grad_std = tree_map(lambda bg: jnp.std(bg, 0), grads)
+        avg_std = jnp.nanmean(ravel_pytree(grad_std)[0])
+
+        grads = tree_map(lambda bg: jnp.mean(bg, 0), grads)
+
+        grad_snr = tree_map(lambda m, sd: jnp.abs(m / sd), grads, grad_std)
+        avg_snr = jnp.nanmean(ravel_pytree(grad_snr)[0])
+
+        for i in range(1, acc_grad):
+            batch_i = (batch[0][(i - 1) * bsz:i * bsz], batch[1][(i - 1) * bsz:i * bsz])
+            grads_i = loss_grad_fn(params, batch_i, rngs, args.kl_coef / train_size)
+            grads_i = tree_map(lambda bg: jnp.mean(bg, 0), grads_i)
+            grads = tree_map(lambda g, g_new: (g * i + g_new) / (i + 1), grads, grads_i)
+
+        pre_update = get_params(opt_state)
+        post_update = jit(opt_update)(i, grads, opt_state)
+        assert jnp.not_equal(ravel_pytree(pre_update)[0], ravel_pytree(get_params(post_update))[0]).any()
+        return post_update, avg_std, avg_snr
+
+    out_shape, init_params = init_random_params(rng_generator.next(), (-1,) + input_size)
+    opt_state = opt_init(init_params)
+    ema_params = init_params
+    best_val_acc, best_test_acc = 0.0, 0.0
+
+    itercount = itertools.count()
+    global_step = 0
+    start_epoch = 0
+
+    # Load the checkpoint if it exists
+    checkpoint_path = os.path.join(output_dir, "best_model_checkpoint.pkl")
+    if os.path.exists(checkpoint_path):
+        logging.warning("Loading checkpoints...")
+        with open(checkpoint_path, "rb") as f:
+            checkpoint = pickle.load(f)
+
+        # Extract states from the checkpoint
+        start_epoch = checkpoint['epoch']
+        best_val_acc = checkpoint['best_val_acc']
+        global_step = checkpoint['global_step']
+        opt_state = checkpoint['optimizer_state']
+        ema_params = checkpoint['ema_state']
+        params = checkpoint['model_state']  # Loaded parameters
+
+        logging.warning(f"Successfully loaded checkpoints for epoch {start_epoch} with best validation accuracy {best_val_acc}")
+
+    unravel_opt = ravel_pytree(opt_state)[1]
+    flat_params, unravel_params = ravel_pytree(get_params(opt_state))  # for pickling params
+    
+    print("\nStarting training...", flush=True)
+    start_training_time = time.time()
+    for epoch in range(start_epoch, args.epochs):
+        itr = itercount.__reduce__()[1][0]
+        print(f"Epoch {epoch} | Iteration: {itr}")
+        start_time = time.time()
+        gradstd_meter = utils.AverageMeter()
+        gradsnr_meter = utils.AverageMeter()
+        for i in tqdm(range(num_batches)):
+            inputs, targets = next(train_batches)
+            targets = jax.nn.one_hot(jnp.array(targets), num_classes=10)
+            inputs = jnp.array(inputs).reshape((-1,) + (input_size[-1],) + input_size[:2])
+            # Permute from NCHW (Pytorch) to NHWC (JAX)
+            inputs = jnp.transpose(inputs, (0, 2, 3, 1))
+            opt_state, gradstd, grad_snr = update(next(itercount), opt_state, (inputs, targets), args.acc_grad, 1, rng_generator.next()) # train on 1 sample
+
+            gradstd_meter.update(float(gradstd), n=inputs.shape[0])
+            gradsnr_meter.update(float(grad_snr), n=inputs.shape[0])
+
+            ema_params = update_ema(ema_params, get_params(opt_state), momentum=args.ema)
+            itr = int(repr(itercount)[6:-1])
+
+            global_step += 1
+            if global_step % args.pause_every == 0:
+                # Evaluate the model with current parameters
+                val_accuracy, val_logits, val_labels, val_nll, val_kl, val_wts = evaluate(
+                    get_params(opt_state), val_loader, input_size, args.nsamples, rng_generator, args.kl_coef
+                )
+
+                # Evaluate the model with EMA parameters
+                val_accuracy_ema, val_logits_ema, val_labels_ema, val_nll_ema, val_kl_ema, val_wts_ema = evaluate(
+                    ema_params, val_loader, input_size, args.nsamples, rng_generator, args.kl_coef
+                )
+                
+                # Convert JAX arrays to NumPy arrays for TensorBoard logging
+                np_val_accuracy = np.array(val_accuracy)
+                np_val_nll = np.array(val_nll)
+                np_val_kl = np.array(val_kl)
+
+                np_val_accuracy_ema = np.array(val_accuracy_ema)
+                np_val_nll_ema = np.array(val_nll_ema)
+                np_val_kl_ema = np.array(val_kl_ema)
+
+                # TensorBoard logging
+                tb_writer.add_scalar('Validation/Accuracy', np_val_accuracy, epoch)
+                tb_writer.add_scalar('Validation/NLL', np_val_nll, epoch)
+                tb_writer.add_scalar('Validation/KL', np_val_kl, epoch)
+
+                tb_writer.add_scalar('Validation/Accuracy_EMA', np_val_accuracy_ema, epoch)
+                tb_writer.add_scalar('Validation/NLL_EMA', np_val_nll_ema, epoch)
+                tb_writer.add_scalar('Validation/KL_EMA', np_val_kl_ema, epoch)
+
+                logging.info(
+                    f"Global step: {global_step}, Epoch: {epoch}, "
+                    f"Validation Accuracy: {val_accuracy:.4f}, "
+                    f"Validation Accuracy EMA: {val_accuracy_ema:.4f}"
+                )
+        
+        epoch_time = time.time() - start_time
+        epoch_info = sep_loss(get_params(opt_state), (inputs, targets), rng_generator.next(), args.kl_coef / train_size)[-1]
+        # check nan
+        no_nans = utils.check_nans([epoch_info['loss'], epoch_info['nll']])
+        if not no_nans:
+            with open(os.path.join(str(output_dir), f"{epoch}_nan.pkl"), 'wb') as f:
+                pickle.dump(get_params(opt_state), f)
+                exit(f"nan encountered in epoch_info and params pickled: {epoch_info}")
+
+        params = get_params(opt_state)
+        train_acc, train_logits, train_labels, train_nll, train_kl, _ = evaluate(params, train_eval_loader, input_size, args.nsamples, rng_generator, args.kl_coef / train_size)
+        print("Train KL", train_kl)
+        train_loss = train_nll + args.kl_coef * train_kl
+        if args.disable_test:
+            val_acc, val_logits, val_labels, val_nll, val_kl = jnp.zeros(1), jnp.zeros_like(train_logits), jnp.zeros(1), jnp.zeros(1)
+            test_acc, test_logits, test_labels, test_nll, test_kl = jnp.zeros(1), jnp.zeros_like(train_logits), jnp.zeros(1), jnp.zeros(1)
+        else:
+            val_acc, val_logits, val_labels, val_nll, val_kl, _ = evaluate(ema_params, val_loader, input_size, args.nsamples, rng_generator, args.kl_coef / train_size)
+            test_acc, test_logits, test_labels, test_nll, test_kl, test_ws = evaluate(ema_params, test_loader, input_size, args.nsamples, rng_generator, args.kl_coef / train_size)
+        val_loss, test_loss = val_nll + args.kl_coef * val_kl, test_nll + args.kl_coef * test_kl
+
+        cal_train = utils.get_calibration(train_labels, jax.device_get(jnp.exp(train_logits)))
+        cal_val= utils.get_calibration(val_labels, jax.device_get(jnp.exp(val_logits)))
+        cal_test = utils.get_calibration(test_labels, jax.device_get(jnp.exp(test_logits)))
+        score_train = utils.score_model(np.asarray(jnp.exp(train_logits)), train_labels, bins=10)
+        score_val = utils.score_model(np.asarray(jnp.exp(val_logits)), val_labels, bins=10)
+        score_test = utils.score_model(np.asarray(jnp.exp(test_logits)), test_labels, bins=10)
+
+        if args.verbose:
+            print("Epoch {} in {:0.2f} sec".format(epoch, epoch_time))
+            print("Training set accuracy {}".format(train_acc))
+            print("Val set accuracy {}".format(val_acc))
+            print("Test set accuracy {}".format(test_acc))
+            print("Training set loss {}".format(train_loss))
+
+            print("Grad STD {}".format(gradstd_meter.avg))
+            print("Grad SNR {}".format(gradsnr_meter.avg), flush=True)
+            print(f"Train scores: {score_train} | cal ECE: {cal_train['ece']}")
+            print(f"Val scores: {score_val} | cal ECE: {cal_val['ece']}")
+            print(f"Test scores: {score_test} | cal ECE: {cal_test['ece']}")
+
+            print(f"shapes: {train_logits.shape} | {val_logits.shape} | {test_logits.shape}")
+
+        if best_val_acc < val_acc:
+            best_val_acc = val_acc
+            print("Best Val Acc", best_val_acc)
+            # Prepare checkpoint state
+            checkpoint_state = {
+                'epoch': epoch,
+                'global_step': global_step,
+                'model_state': get_params(opt_state),
+                'ema_state': ema_params,
+                'optimizer_state': opt_state,
+                'best_val_acc': best_val_acc,
+            }
+            # Save checkpoint
+            utils.save_params(checkpoint_state, os.path.join(output_dir, f"best_model_checkpoint.pkl"), pkl=True)
+            print(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')} at epoch {epoch}")
+            logging.info(f"Saved checkpoint to {os.path.join(output_dir, 'best_model_checkpoint.pkl')} at epoch {epoch}")
+
+        if best_test_acc < test_acc:
+            best_test_acc = test_acc
+            print("Best Test Acc", best_test_acc)
+
+        with open(os.path.join(output_dir, "results.txt"), "a") as f:
+            f.write(f"Epoch {epoch} in {epoch_time:.2f} sec | Train acc {train_acc} | Val acc {val_acc} | " +
+                    f"Test acc {test_acc} | Train loss {train_loss} | Val loss {val_loss} | Test loss {test_loss} | " +
+                    f"Train KL {train_kl} | Val KL {val_kl} | Test KL {test_kl} | " +
+                    f"Train ECE {cal_train['ece']} | Val ECE {cal_val['ece']} | Test ECE {cal_test['ece']}\n")
+        logging.warning(f"Wrote epoch info to {os.path.join(output_dir, 'results.txt')}")
+
+    training_time = time.time() - start_training_time
+    print(f"Finished successfully {args.epochs} epochs in {training_time:.2f} seconds")
+    tb_writer.close()
