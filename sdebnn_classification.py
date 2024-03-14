@@ -110,7 +110,7 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PSDE-BNN-H CIFAR10 Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet", "psdenet_h"], default="psdenet_h")
-    parser.add_argument("--output", type=str, default="output-psde-horizontal-05", help="(default: %(default)s)")
+    parser.add_argument("--output", type=str, default="output-psde-horizontal-01", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42) # 0
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", default=True, action="store_true")
 
     parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.5) # Time step that divides SDE from ODE
+    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
     parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
@@ -151,6 +151,7 @@ if __name__ == "__main__":
     parser.add_argument("--fx_dim", type=int, default=64, help="(default: %(default)s)")
     parser.add_argument("--fx_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
     parser.add_argument("--fw_dims", type=str, default="1-64-1", help="dash-separated integers (default: %(default)s)") # 2-128-2 for PSDEBNN(v) and SDEBNN
+    parser.add_argument("--fw_s_dims", type=str, default="1-16-1", help="dash-separated integers (default: %(default)s")
     parser.add_argument("--fw_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
     parser.add_argument("--lr_sched", type=str, choices=['constant', 'custom', 'custom2', 'stair', 'exp', 'inv', 'cos', 'warmup'], default="constant", help="(default: %(default)s)")
     args = parser.parse_args()
@@ -272,13 +273,14 @@ if __name__ == "__main__":
     
     else:
         # PSDEBNN
-        fw_dims = list(map(int, args.fw_dims.split("-")))
+        fw_s_dims = list(map(int, args.fw_s_dims.split("-")))
+        fw_d_dims = list(map(int, args.fw_dims.split("-")))
 
         layers = [mf(arch.Augment(args.aug))]
         nblocks = list(map(int, args.nblocks.split("-")))
         for i, nb in enumerate(nblocks):
-            fw_s = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Stochastic weights
-            fw_d = arch.MLP(fw_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Deterministic weights
+            fw_s = arch.MLP(fw_s_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Stochastic weights
+            fw_d = arch.MLP(fw_d_dims, actfn=args.fw_actfn, xt=args.no_xt, ou_dw=args.ou_dw, nonzero_w=args.w_init, nonzero_b=args.b_init, p_scale=args.p_init)  # Deterministic weights
             if args.meanfield_sdebnn:
                 layers.extend([mf(brax.PSDEBNN_H(args.block_type,
                                               args.fx_dim,

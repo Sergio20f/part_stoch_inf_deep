@@ -614,6 +614,8 @@ def PSDEBNN_H(fx_block_type,
         def apply_fun(params, inputs, rng, full_output=False, fixed_grid=True, **kwargs):
             
             init_w0, logstd_w0, fw1_params, fw2_params = params
+            #fw1_params = fw_params[:w_dim*ratio]
+            #fw2_params = fw_params[w_dim*ratio:]
             x = inputs
             
             if infer_initial_state:
