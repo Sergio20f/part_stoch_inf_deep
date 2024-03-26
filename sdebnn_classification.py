@@ -12,7 +12,8 @@ from pathlib import Path
 
 import numpy as np
 import arch
-import brax_new as brax
+#import brax_new as brax
+import brax
 from resnet import resnet32v2
 import utils
 from datasets import get_dataset
@@ -109,14 +110,14 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PSDE-BNN-V 07 (fast) CIFAR10 Training")
+    parser = argparse.ArgumentParser(description="PSDE-BNN-V 01 Omniglot Training")
     parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet", "psdenet_h"], default="psdenet")
-    parser.add_argument("--output", type=str, default="output-psde-odefirst-07-fast", help="(default: %(default)s)")
+    parser.add_argument("--output", type=str, default="output-psde-odefirst-01-omniglot", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42) # 0
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
     parser.add_argument("--epochs", type=int, default=100, help="(default: %(default)s)")
-    parser.add_argument("--bs", type=int, default=128, help="(default: %(default)s)")
+    parser.add_argument("--bs", type=int, default=64, help="(default: %(default)s)")
     parser.add_argument("--test_bs", type=int, default=1000)
     parser.add_argument("--nsamples", type=int, default=1)
     parser.add_argument("--w_init", type=float, default=-1., help="scale the last layer W init of w_net. default: $(default)")
@@ -128,9 +129,9 @@ if __name__ == "__main__":
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
     # for PSDEBNN makes sense to have kl_coef as a function of the timecut (1/(timecut))*10**-4
     #parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
-    parser.add_argument("--kl_coef", type=float, default=(1/(0.7))*10**-4, help="(default: %(default)s)") # CHANGE RATIO
+    parser.add_argument("--kl_coef", type=float, default=(1/(0.1))*10**-4, help="(default: %(default)s)") # CHANGE RATIO
     parser.add_argument("--diff_coef", type=float, default=0.1, help="(default: %(default)s)") # CHANGE 0.1
-    parser.add_argument("--ds", type=str, choices=["mnist", "cifar10"], default="cifar10", help="(default: %(default)s)")
+    parser.add_argument("--ds", type=str, choices=["mnist", "cifar10", "omniglot"], default="omniglot", help="(default: %(default)s)")
     parser.add_argument("--no_xt", action="store_false", help="time dependent")
     parser.add_argument("--acc_grad", type=int, default=1)
     parser.add_argument("--aug", type=int, default=0, help="(default: %(default)s)")
@@ -143,7 +144,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", default=True, action="store_true")
 
     parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.7) # Time step that divides SDE from ODE
+    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
     parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
