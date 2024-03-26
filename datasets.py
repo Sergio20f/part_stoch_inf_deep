@@ -68,6 +68,18 @@ def get_dataset(batch_size, test_batch_size, dataset):
             transform=test_transform,
             download=True,
         )
+
+    elif dataset == "omniglot":
+      input_size = (64, 64, 1)
+      #input_size = (105, 105, 1)  Original Omniglot image size is 105x105
+      transform = transforms.Compose([
+          transforms.Resize((64, 64)),  # Resizing to 64x64 as per your requirement
+          transforms.ToTensor(),
+          transforms.Normalize((0.92206,), (0.08426,))  # Normalizing
+      ])
+      # The Omniglot dataset in PyTorch has each alphabet in a separate folder, with each character as a subfolder containing images of that character.
+      train_set = Omniglot(root=f"{SCRIPT_DIR}/data/omniglot", background=True, download=True, transform=transform)
+      test_set = Omniglot(root=f"{SCRIPT_DIR}/data/omniglot", background=False, download=True, transform=transform)
       
     elif dataset == "svhn":
       input_size = (32, 32, 3)

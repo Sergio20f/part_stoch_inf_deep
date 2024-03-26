@@ -546,9 +546,9 @@ def PSDEBNN_H(fx_block_type,
         del tmp_w
 
         # x_dim definitely not be negative...
-        x_dim = jnp.abs(jnp.prod(x_shape))
-        w_dim = jnp.abs(jnp.prod(w_shape))
-        w_dim1 = int(jnp.abs(jnp.prod(w_shape)) * ratio)
+        x_dim = np.abs(np.prod(x_shape))
+        w_dim = np.abs(np.prod(w_shape))
+        w_dim1 = int(np.abs(np.prod(w_shape)) * ratio)
         w_dim2 = int(w_dim - w_dim1)
 
         w1_shape = (w_dim1,)
