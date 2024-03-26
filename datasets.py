@@ -21,7 +21,7 @@ from registry import add_data
 from jax import vmap
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.datasets import CIFAR10, MNIST, SVHN
+from torchvision.datasets import CIFAR10, MNIST, SVHN, Omniglot
 
 tf.config.experimental.set_visible_devices([], "GPU")
 

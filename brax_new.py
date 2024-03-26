@@ -72,8 +72,8 @@ def PSDEBNN(fx_block_type,
         del tmp_w
 
         # x_dim definitely not be negative...
-        x_dim = jnp.abs(jnp.prod(x_shape))
-        w_dim = jnp.abs(jnp.prod(w_shape))
+        x_dim = np.abs(np.prod(x_shape))
+        w_dim = np.abs(np.prod(w_shape))
 
         def f_aug_sde(y, t, args):
 

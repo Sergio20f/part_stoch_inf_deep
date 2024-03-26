@@ -11,7 +11,8 @@ from functools import partial
 from pathlib import Path
 
 import numpy as np
-import arch, brax
+import arch
+import brax_new as brax
 from resnet import resnet32v2
 import utils
 from datasets import get_dataset
@@ -67,7 +68,7 @@ def accuracy(params, data, nsamples, rng):
     predicted_class = jnp.argmax(avg_preds, axis=1)
     n_correct = jnp.sum(predicted_class == target_class)
     n_total = inputs.shape[0]
-    wts = info_dic['psdebnn_h_w'] # info_dic['sdebnn_w'] HAVE TO MANUALLY CHANGE THIS
+    wts = info_dic['psdebnn_w'] # info_dic['sdebnn_w'] HAVE TO MANUALLY CHANGE THIS - For PSDEBNN_H use info_dic['psdebnn_h_w'] - For PSDEBNN use info_dic['psdebnn_w']
     wts = jnp.stack(wts, axis=0)
     avg_wts = wts.mean(0)
     return n_correct, n_total, avg_preds, avg_wts
@@ -108,9 +109,9 @@ def evaluate(params, data_loader, input_size, nsamples, rng_generator, kl_coef):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PSDE-BNN-H CIFAR10 Training")
-    parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet", "psdenet_h"], default="psdenet_h")
-    parser.add_argument("--output", type=str, default="output-psde-horizontal-01", help="(default: %(default)s)")
+    parser = argparse.ArgumentParser(description="PSDE-BNN-V 07 (fast) CIFAR10 Training")
+    parser.add_argument("--model", type=str, choices=["resnet", "sdenet", "psdenet", "psdenet_h"], default="psdenet")
+    parser.add_argument("--output", type=str, default="output-psde-odefirst-07-fast", help="(default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42) # 0
     parser.add_argument("--stl", action="store_true")
     parser.add_argument("--lr", type=float, default=7e-4, help="(default: %(default)s)")
@@ -126,8 +127,8 @@ if __name__ == "__main__":
     parser.add_argument("--no_drift", action="store_true")
     parser.add_argument("--ou_dw", action="store_false", help="OU prior on dw (difference parameterization)")
     # for PSDEBNN makes sense to have kl_coef as a function of the timecut (1/(timecut))*10**-4
-    #parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)")
-    parser.add_argument("--kl_coef", type=float, default=(1/(0.5))*10**-4, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
+    #parser.add_argument("--kl_coef", type=float, default=1e-3, help="(default: %(default)s)") # When model is deterministic (ODENet) set to 0, otherwise 1e-3
+    parser.add_argument("--kl_coef", type=float, default=(1/(0.7))*10**-4, help="(default: %(default)s)") # CHANGE RATIO
     parser.add_argument("--diff_coef", type=float, default=0.1, help="(default: %(default)s)") # CHANGE 0.1
     parser.add_argument("--ds", type=str, choices=["mnist", "cifar10"], default="cifar10", help="(default: %(default)s)")
     parser.add_argument("--no_xt", action="store_false", help="time dependent")
@@ -141,8 +142,8 @@ if __name__ == "__main__":
     parser.add_argument("--disable_test", action="store_true")
     parser.add_argument("--verbose", default=True, action="store_true")
 
-    parser.add_argument('--ode-first', type=bool, default=False) # ODE or SDE first, True for ODE first
-    parser.add_argument('--timecut', type=float, default=0.1) # Time step that divides SDE from ODE
+    parser.add_argument('--ode-first', type=bool, default=True) # ODE or SDE first, True for ODE first
+    parser.add_argument('--timecut', type=float, default=0.7) # Time step that divides SDE from ODE
     parser.add_argument('--method-ode', type=str, choices=["euler", "midpoint"], default='euler') # ODE solver, euler or rk4
     parser.add_argument('--fix_w1', type=bool, default=False) # Fix w1 in PSDEBNN
     parser.add_argument("--nblocks", type=str, default="2-2-2", help="dash-separated integers (default: %(default)s)")
@@ -150,8 +151,8 @@ if __name__ == "__main__":
     parser.add_argument("--block_type", type=int, choices=[0, 1, 2], default=0, help="(default: %(default)s)")
     parser.add_argument("--fx_dim", type=int, default=64, help="(default: %(default)s)")
     parser.add_argument("--fx_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
-    parser.add_argument("--fw_dims", type=str, default="1-64-1", help="dash-separated integers (default: %(default)s)") # 2-128-2 for PSDEBNN(v) and SDEBNN
-    parser.add_argument("--fw_s_dims", type=str, default="1-16-1", help="dash-separated integers (default: %(default)s")
+    parser.add_argument("--fw_dims", type=str, default="2-128-2", help="dash-separated integers (default: %(default)s)") # 2-128-2 for PSDEBNN(v) and SDEBNN
+    parser.add_argument("--fw_s_dims", type=str, default="1-64-1", help="dash-separated integers (default: %(default)s") # Only applies when using PSDEBNN_H
     parser.add_argument("--fw_actfn", type=str, choices=["softplus", "tanh", "elu", "swish", "rbf"], default="softplus", help="(default: %(default)s)")
     parser.add_argument("--lr_sched", type=str, choices=['constant', 'custom', 'custom2', 'stair', 'exp', 'inv', 'cos', 'warmup'], default="constant", help="(default: %(default)s)")
     args = parser.parse_args()
